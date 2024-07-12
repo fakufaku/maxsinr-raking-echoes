@@ -166,7 +166,7 @@ def process_experiment_max_sinr(SIR, mic, args):
 
     def analysis(x):
         engine.analysis(x)
-        return np.moveaxis(engine.X, 1, 0)
+        return engine.X
 
     # Now compute the STFT of the microphone input
     X = analysis(audio)
@@ -186,19 +186,18 @@ def process_experiment_max_sinr(SIR, mic, args):
     sys.stdout.flush()
 
     # covariance matrices from noisy signal
-    Rs = np.einsum("i...j,i...k->...jk", X_speech, np.conj(X_speech))
-    Rn = np.einsum("i...j,i...k->...jk", X_noise, np.conj(X_noise))
+    Rs = np.einsum("i...j,i...k->...jk", X_speech, np.conj(X_speech)) / X_speech.shape[-1]
+    Rn = np.einsum("i...j,i...k->...jk", X_noise, np.conj(X_noise)) / X_noise.shape[-1]
 
     # compute covariances with reference signals to check everything is working correctly
     # Rs = np.einsum('i...j,i...k->...jk', S_ref, np.conj(S_ref))
     # Rn = np.einsum('i...j,i...k->...jk', N_ref, np.conj(N_ref))
 
     # compute the MaxSINR beamformer
-    # add a loading factor on rn to avoid numerical errors
     w = [
         la.eigh(
             rs,
-            b=rn + np.eye(rs.shape[0]) * 1e-10,
+            b=rn,
             eigvals=(n_channels - 1, n_channels - 1),
         )[1]
         for rs, rn in zip(Rs[1:], Rn[1:])
@@ -320,8 +319,8 @@ def process_experiment_max_sinr(SIR, mic, args):
         room.add_microphone_array(mic_array)
         room.plot(img_order=1, freq=[800, 1000, 1200, 1400, 1600, 2500, 4000])
 
-        #plt.figure()
-        #mic_array.plot()
+        plt.figure()
+        mic_array.plot()
 
         plt.show()
 
