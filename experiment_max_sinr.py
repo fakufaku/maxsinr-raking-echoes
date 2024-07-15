@@ -169,8 +169,10 @@ def process_experiment_max_sinr(SIR, mic, args):
         return engine.X
 
     # Now compute the STFT of the microphone input
+    print('audio', audio.shape)
     X = analysis(audio)
     X_time = np.arange(1, X.shape[0] + 1) * (nfft / 2) / fs_snd
+    print(X.shape)
 
     X_speech = analysis(audio * vad_guarded[:, None])
     X_noise = analysis(audio * (1 - vad_guarded[:, None]))
@@ -203,12 +205,14 @@ def process_experiment_max_sinr(SIR, mic, args):
         for rs, rn in zip(Rs[1:], Rn[1:])
     ]
     w = np.squeeze(np.array(w))
+    print(w.shape)
     nw = la.norm(w, axis=1)
     w[nw > 1e-10, :] /= nw[nw > 1e-10, None]
     w = np.concatenate([np.ones((1, n_channels)), w], axis=0)
 
     if not args.no_norm:
         # normalize with respect to input signal
+        import ipdb; ipdb.set_trace()
         z = compute_gain(w, X_speech, X_speech[:, :, 0], clip_up=args.clip_gain)
         w *= z[:, None]
 
