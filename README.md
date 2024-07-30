@@ -12,3 +12,16 @@ tar xzfv otohikari_robin_measurements_20171207.tar.gz
 # arguments are <SNR> and <ARRAY>, e.g.,
 python ./experiment_max_sinr.py 5 pyramic --plot
 ```
+
+
+To install CACGMM
+```bash
+# 1. dowload the repo
+git clone https://github.com/desh2608/cacgmm.git
+cd cacgmm
+
+# 2. replace all the cupy with numpy (if you run on a non-gpu machine)
+# 'import cupy as cp' --> 'import numpy as cp'
+
+# 3. install the lib locally in editable version
+pip install -e .
