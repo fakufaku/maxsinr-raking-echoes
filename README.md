@@ -13,8 +13,24 @@ tar xzfv otohikari_robin_measurements_20171207.tar.gz
 python ./experiment_max_sinr.py 5 pyramic --plot
 ```
 
+## Type of Beamformers
 
-To install CACGMM
+- [x] MaxSIR (legacy)
+- [ ] Delay and sum (legacy)
+- [ ] MVDR (legacy)
+- [ ] Robust MVDR (legacy)
+- [ ] Souden MVDR (legacy)
+- [ ] LCMV (legacy)
+- [ ] Rake BF (pyroomacoustics)
+
+Mask estimators
+- [x] LED
+- [ ] CACGMM mask-estimator
+- [ ] Neural BF
+
+
+
+To install **CACGMM**
 ```bash
 # 1. dowload the repo
 git clone https://github.com/desh2608/cacgmm.git

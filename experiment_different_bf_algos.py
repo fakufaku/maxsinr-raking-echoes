@@ -267,20 +267,19 @@ def process_experiment_max_sinr(SIR, mic, args):
         })
         print(f"Source {s}")
         
-    # plot to check
-    fig, axarr = plt.subplots(1, 2, figsize=(24,4), sharey=True)
-    source_name = ['interf', 'target']
-    for src_idx in [0, 1]:
-        doas_ = source_echoes[src_idx]['doas_far']
-        coeff_ = source_echoes[src_idx]['coeffs_far']
-        for d, (doa, coeff) in enumerate(zip(doas_, coeff_)):
-            axarr[src_idx].arrow(doa, 0, 0, coeff, width = 0.015, edgecolor = 'black', facecolor = 'C0', lw = 1, zorder = 2)
+    # # plot to check
+    # fig, axarr = plt.subplots(1, 2, figsize=(24,4), sharey=True)
+    # source_name = ['interf', 'target']
+    # for src_idx in [0, 1]:
+    #     doas_ = source_echoes[src_idx]['doas_far']
+    #     coeff_ = source_echoes[src_idx]['coeffs_far']
+    #     for d, (doa, coeff) in enumerate(zip(doas_, coeff_)):
+    #         axarr[src_idx].arrow(doa, 0, 0, coeff, width = 0.015, edgecolor = 'black', facecolor = 'C0', lw = 1, zorder = 2)
 
-        axarr[src_idx].set_title('{} DOAs'.format(source_name[src_idx]))
+    #     axarr[src_idx].set_title('{} DOAs'.format(source_name[src_idx]))
 
-    plt.suptitle("Aggregated sources' DOAs")
-    plt.tight_layout()
-    plt.show()
+    # plt.suptitle("Aggregated sources' DOAs")
+    # plt.tight_layout()
     
 
     ##########################
@@ -293,6 +292,7 @@ def process_experiment_max_sinr(SIR, mic, args):
     # covariance matrices from noisy signal
     Rs = np.einsum("i...j,i...k->...jk", X_speech, np.conj(X_speech)) / X_speech.shape[-1]
     Rn = np.einsum("i...j,i...k->...jk", X_noise, np.conj(X_noise)) / X_noise.shape[-1]
+    # Rs = Rs - Rn
 
     # compute the MaxSINR beamformer
     w = [
@@ -425,13 +425,14 @@ def process_experiment_max_sinr(SIR, mic, args):
         plt.legend(["channel 0", "beamformer output", "speech reference"])
         
         # SIGNAL IN FREQ DOMAIN
-        X_n_freq = np.abs(np.mean(X_noise[...,0], axis=0))**2
-        X_s_freq = np.abs(np.mean(X_speech[...,0], axis=0))**2
+        X_n_freq = np.sum(np.abs(X_noise[...,0])**2, axis=0) / np.sum(np.mean(np.abs(X_noise)[...,0], axis=1) > 1e-6 )
+        X_s_freq = np.sum(np.abs(X_speech[...,0])**2, axis=0) / np.sum(np.mean(np.abs(X_speech)[...,0], axis=1) > 1e-6 )
         
         freqs = np.fft.rfftfreq(nfft, 1/fs)
         freqs_to_plot = [125.0, 218.75, 406.25, 500.0, 718.75, 1218.75] # Hz, manual
-        plt.plot(freqs[1:], X_n_freq[1:], label='noise')
-        plt.plot(freqs[1:], X_s_freq[1:], label='speech')
+        plt.figure()
+        plt.semilogy(freqs, X_n_freq, label='noise')
+        plt.semilogy(freqs, X_s_freq, label='speech')
         for freq in freqs_to_plot:
             plt.axvline(x=freq, color='r', linestyle='--')
         plt.xlim([0, 2000])
@@ -484,8 +485,8 @@ def process_experiment_max_sinr(SIR, mic, args):
 
         fig = plt.figure(figsize=(16, 12))
         axes = generate_axes(fig)
-        axes['spec'].plot(X_n_freq, freqs, label='Noise PSD')
-        axes['spec'].plot(X_s_freq, freqs, label='Speech PSD')
+        axes['spec'].semilogx(X_n_freq, freqs, label='Noise PSD')
+        axes['spec'].semilogx(X_s_freq, freqs, label='Speech PSD')
         axes['spec'].invert_xaxis()
         axes['spec'].set_ylim([100, 2000])
         axes['spec'].legend(loc="upper right")
@@ -493,10 +494,14 @@ def process_experiment_max_sinr(SIR, mic, args):
         for f, freq in enumerate(freqs_to_plot):
             freq_idx = np.argmin(np.abs(freqs - freq))
             curr_bf = bf_freq_abs[freq_idx]
+            curr_bf_normalized = curr_bf / np.max(curr_bf)
             axes[f'lin_doas{f+1}'].plot(np.rad2deg(theta), curr_bf, label=f'BF at {freq:.0f} Hz')
+            axes[f'lin_doas{f+1}'].plot(np.rad2deg(theta), curr_bf_normalized, label=f'BF normalized', alpha=0.8)
             
             axes[f'pol_doas{f+1}'].plot(theta, curr_bf, label=f'{freq:.0f} Hz')
+            axes[f'pol_doas{f+1}'].plot(theta, curr_bf_normalized, label=f'{freq:.0f} Hz, normalized', alpha=0.8)
             axes[f'pol_doas{f+1}b'].plot(theta, curr_bf, label=f'{freq:.0f} Hz')
+            axes[f'pol_doas{f+1}b'].plot(theta, curr_bf_normalized, label=f'{freq:.0f} Hz, normalized', alpha=0.8)
             
             axes[f'pol_doas{f+1}'].set_xticks([])
             axes[f'pol_doas{f+1}'].set_yticks([])
@@ -505,10 +510,9 @@ def process_experiment_max_sinr(SIR, mic, args):
             
             for s, src_name, color, plot in zip([0, 1], ['target', 'interf'], ['C0', 'C1'], ['', 'b']):
                 doas_ = source_echoes[s]['doas_far']
-                import ipdb; ipdb.set_trace()
                 doas_[doas_ > np.pi] -= 2*np.pi
                 coeff_ = source_echoes[s]['coeffs_far']
-                coeff_ = coeff_  / np.max(coeff_)
+                coeff_ /= np.max(coeff_)
                 for i, (doa, coeff) in enumerate(zip(doas_, coeff_)):
                     if i == 0:
                         axes[f'pol_doas{f+1}{plot}'].arrow(doa, 0, 0, coeff, width = 0.015, edgecolor = color, facecolor = color, lw = 1, zorder = 5, label=src_name)
