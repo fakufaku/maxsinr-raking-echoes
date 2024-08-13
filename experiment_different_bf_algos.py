@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
 from max_sinr_beamforming import compute_gain
+from geo_utils import get_wall_order_from_images
 
 experiment_folder = "datanet/projects/otohikari/robin/measurements/20171207"
 file_pattern = os.path.join(experiment_folder, "segmented/{}_{}_SIR_{}_dB.wav")
@@ -193,13 +194,14 @@ def process_experiment_max_sinr(SIR, mic, args):
     X_time = np.arange(1, X.shape[0] + 1) * (nfft / 2) / fs_snd
     print(X.shape)
 
+    X_mix = analysis(mix)
     X_speech = analysis(mix * vad_guarded[:, None])
     X_noise = analysis(mix * (1 - vad_guarded[:, None]))
     
     # Signal alignment step
     delay = np.abs(int(pra.tdoa(speech_ref[:, 0].astype(float), mix[:,0], phat=True)))
-    speech_ref_ = np.concatenate((np.zeros(delay), speech_ref[:,0]))
-    noise_ref_ = np.concatenate((np.zeros(delay), noise_ref[:,0]))
+    speech_ref_ = np.concatenate((np.zeros(delay), speech_ref[:mix.shape[0] - delay,0]))
+    noise_ref_ = np.concatenate((np.zeros(delay), noise_ref[:mix.shape[0] - delay,0]))
     
     # plot all the signals
     if args.plot:
@@ -214,18 +216,23 @@ def process_experiment_max_sinr(SIR, mic, args):
         
     S_ref = pra.transform.stft.STFT(nfft, nfft // 2, pra.hann(nfft)).analysis(speech_ref_)
     N_ref = pra.transform.stft.STFT(nfft, nfft // 2, pra.hann(nfft)).analysis(noise_ref_)
-    oracle_mask = np.abs(S_ref) > 1.5*np.abs(N_ref)
-    idx_low_freqs = np.where(freqs < 64)[0]
-    oracle_mask[:,idx_low_freqs] = False
+    oracle_mask = np.abs(S_ref) > 10 * np.mean(np.abs(S_ref)[:30,:], axis=0)
+    oracle_mask = np.abs(S_ref) / (np.abs(S_ref) + np.abs(N_ref))
+    X_speech_oracle = X_mix * oracle_mask[:,:,None]
+
+    # X_speech = X_speech_oracle
+    # X_noise = X_mix - X_speech_oracle
     
     if args.plot:
-        fig, ax = plt.subplots(3, 1, figsize=(12, 6), sharex=True)
+        fig, ax = plt.subplots(4, 1, figsize=(12, 6), sharex=True)
         img = lr.display.specshow(lr.amplitude_to_db(np.abs(S_ref.T), ref=np.max), y_axis='log', x_axis='time', ax=ax[0], sr=fs)
         ax[0].set_title("Speech reference")
         img = lr.display.specshow(lr.amplitude_to_db(np.abs(N_ref.T), ref=np.max), y_axis='log', x_axis='time', ax=ax[1], sr=fs)
         ax[1].set_title('Noise reference')
         img = lr.display.specshow(np.abs(oracle_mask.T), y_axis='log', x_axis='time', ax=ax[2], sr=fs)
         ax[2].set_title('Speech mask reference')
+        img = lr.display.specshow(lr.amplitude_to_db(np.abs(X_speech_oracle[:,:,0].T), ref=np.max), y_axis='log', x_axis='time', ax=ax[3], sr=fs)
+        ax[3].set_title('Masked mix')
         plt.tight_layout()
 
     ###############
@@ -252,36 +259,43 @@ def process_experiment_max_sinr(SIR, mic, args):
     
         src_images_pos =  room.sources[s].images
         src_images_order = room.sources[s].orders
-        src_images_dampings = room.sources[s].damping
-        src_images_walls = room.sources[s].walls
+        src_images_dampings = room.sources[s].damping.squeeze()
         src_images_dist = np.linalg.norm(src_images_pos - mics_loc[:,None], axis=0)
 
         # sort accoding to distance
         idx = np.argsort(src_images_dist)
             
-        src_images_dist = src_images_dist[idx]
         src_images_pos = src_images_pos[:,idx]
-        src_images_dampings = src_images_dampings[:,idx]
-        
-        # remove the images that are not on the x-y plane
-        src_images_z = src_images_pos[2,:]
-        idx = np.where(np.abs(src_images_z - src_images_z[0]) < 1e-6 )[0]
-        
         src_images_dist = src_images_dist[idx]
-        src_images_pos = src_images_pos[:,idx]
-        src_images_dampings = src_images_dampings[:,idx]
+        src_images_order = src_images_order[idx]
+        src_images_dampings = src_images_dampings[idx]
+        
+        # # remove the images that are not on the x-y plane
+        # src_images_z = src_images_pos[2,:]
+        # idx = np.where(np.abs(src_images_z - src_images_z[0]) < 1e-6 )[0]
+        
+        # src_images_pos = src_images_pos[:,idx]
+        # src_images_dist = src_images_dist[idx]
+        # src_images_dampings = src_images_dampings[idx]
+        # src_images_order = src_images_order[idx]
         
         # keep first 100 accoding to distance    
-        src_images_dist = src_images_dist[:n_images]
         src_images_pos = src_images_pos[:,:n_images]
-        src_images_dampings = src_images_dampings[:,:n_images]
-        
-        coeff = src_images_dampings.squeeze() / src_images_dist
+        src_images_dist = src_images_dist[:n_images]
+        src_images_dampings = src_images_dampings[:n_images]
+        src_images_order = src_images_order[:n_images]
         
         # prune the doas whose energy is below a threshold
+        coeff = src_images_dampings / src_images_dist
         idx = coeff > 0.1 * coeff[0]
         src_images_pos = src_images_pos[:,idx]
-        coeff = coeff[idx]
+        src_images_dist = src_images_dist[idx]
+        src_images_dampings = src_images_dampings[idx]
+        src_images_order = src_images_order[idx]
+        coeff = src_images_dampings / src_images_dist
+    
+        # get the wall list
+        src_images_walls = get_wall_order_from_images(src_images_pos, mics_loc, room_dim)
 
         # angle between image and reference point
         unit_vect = src_images_pos - mics_loc[:,None]
@@ -289,29 +303,16 @@ def process_experiment_max_sinr(SIR, mic, args):
         doas_images = np.mod(doas_images, 2*np.pi)
         toas_images = src_images_dist / room.c
 
-        
         source_echoes.append({
             "coeffs" : coeff,
             "doas" : doas_images,
             "toas" : toas_images,
             "images" : src_images_pos,
+            "walls" : src_images_walls,
+            "order" : src_images_order,
         })
         print(f"Source {s}")
         
-    # # plot to check
-    # fig, axarr = plt.subplots(1, 2, figsize=(24,4), sharey=True)
-    # source_name = ['interf', 'target']
-    # for src_idx in [0, 1]:
-    #     doas_ = source_echoes[src_idx]['doas_far']
-    #     coeff_ = source_echoes[src_idx]['coeffs_far']
-    #     for d, (doa, coeff) in enumerate(zip(doas_, coeff_)):
-    #         axarr[src_idx].arrow(doa, 0, 0, coeff, width = 0.015, edgecolor = 'black', facecolor = 'C0', lw = 1, zorder = 2)
-
-    #     axarr[src_idx].set_title('{} DOAs'.format(source_name[src_idx]))
-
-    # plt.suptitle("Aggregated sources' DOAs")
-    # plt.tight_layout()
-    
 
     ##########################
     ## MAX SINR BEAMFORMING ##
@@ -344,6 +345,7 @@ def process_experiment_max_sinr(SIR, mic, args):
         # normalize with respect to input signal
         z = compute_gain(w, X_speech, X_speech[:, :, 0], clip_up=args.clip_gain)
         w *= z[:, None]
+    bf_weights = w
 
     ###########
     ## APPLY ##
@@ -412,242 +414,326 @@ def process_experiment_max_sinr(SIR, mic, args):
 
     if args.plot:
         
-        # MICROPHONE
-        plt.figure(figsize=(12,4))
-        plt.suptitle('Microphone positions')
-        plt.subplot(1,3,1)
-        plt.scatter(mics_positions[:,0], mics_positions[:,1], c='r')
-        plt.subplot(1,3,2)
-        plt.scatter(mics_positions[:,0], mics_positions[:,2], c='r')
-        plt.subplot(1,3,3)
-        plt.scatter(mics_positions[:,1], mics_positions[:,2], c='r')
-        plt.tight_layout()
+        if True: # added only to filter some plots
+       
+            # MICROPHONE
+            plt.figure(figsize=(12,4))
+            plt.suptitle('Microphone positions')
+            plt.subplot(1,3,1)
+            plt.scatter(mics_positions[:,0], mics_positions[:,1], c='r')
+            plt.subplot(1,3,2)
+            plt.scatter(mics_positions[:,0], mics_positions[:,2], c='r')
+            plt.subplot(1,3,3)
+            plt.scatter(mics_positions[:,1], mics_positions[:,2], c='r')
+            plt.tight_layout()
 
-        # SIGNAL
-        plt.figure()
-        plt.plot(out_trunc)
-        plt.plot(speech_ref[:, 0])
-        plt.legend(["output", "reference"])
+            # SIGNAL
+            plt.figure()
+            plt.plot(out_trunc)
+            plt.plot(speech_ref[:, 0])
+            plt.legend(["output", "reference"])
 
-        # time axis for plotting
-        led_time = np.arange(leds.shape[0]) / fs_led + 1 / (2 * fs_led)
-        mix_time = np.arange(n_samples) / fs_snd
+            # time axis for plotting
+            led_time = np.arange(leds.shape[0]) / fs_led + 1 / (2 * fs_led)
+            mix_time = np.arange(n_samples) / fs_snd
 
-        plt.figure()
-        plt.plot(led_time, leds, "r")
-        plt.title("LED signal")
+            plt.figure()
+            plt.plot(led_time, leds, "r")
+            plt.title("LED signal")
 
-        # match the scales of VAD and light to sound before plotting
-        q_vad = np.max(mix)
-        q_led = np.max(mix) / np.max(leds)
+            # match the scales of VAD and light to sound before plotting
+            q_vad = np.max(mix)
+            q_led = np.max(mix) / np.max(leds)
 
-        plt.figure()
-        plt.plot(mix_time, mix[:, 0], "b")
-        plt.plot(led_time, leds * q_led, "r")
-        plt.plot(mix_time, vad_snd * q_vad, "g")
-        plt.plot(mix_time, vad_guarded * q_vad, "g--")
-        plt.legend(["mix", "VAD"])
-        plt.title("LED and mix signals")
+            plt.figure()
+            plt.plot(mix_time, mix[:, 0], "b")
+            plt.plot(led_time, leds * q_led, "r")
+            plt.plot(mix_time, vad_snd * q_vad, "g")
+            plt.plot(mix_time, vad_guarded * q_vad, "g--")
+            plt.legend(["mix", "VAD"])
+            plt.title("LED and mix signals")
 
-        plt.figure()
-        a_time = np.arange(mix.shape[0]) / fs_snd
-        plt.plot(a_time, mix[:, 0])
-        plt.plot(a_time, out_trunc)
-        plt.legend(["channel 0", "beamformer output", "speech reference"])
-        
-        # SIGNAL IN FREQ DOMAIN
-        n_frames_n = np.sum(np.mean(np.abs(X_noise)[...,0], axis=1) > 1e-6 ) # number of frame where noise is active
-        n_frames_s = np.sum(np.mean(np.abs(X_speech)[...,0], axis=1) > 1e-6 )
-        X_n_freq = np.sum(np.abs(X_noise[...,0])**2, axis=0) / n_frames_n
-        X_s_freq = np.sum(np.abs(X_speech[...,0])**2, axis=0) / n_frames_s
-        
-        freqs_to_plot = [125.0, 218.75, 406.25, 500.0, 718.75, 1218.75] # Hz, manual
-        plt.figure()
-        plt.semilogy(freqs, X_n_freq, label='noise')
-        plt.semilogy(freqs, X_s_freq, label='speech')
-        for freq in freqs_to_plot:
-            plt.axvline(x=freq, color='r', linestyle='--')
-        plt.xlim([0, 2000])
-        plt.legend()        
-        plt.title('Spectrum of the signals, channel 0, salient frequencies')
+            plt.figure()
+            a_time = np.arange(mix.shape[0]) / fs_snd
+            plt.plot(a_time, mix[:, 0])
+            plt.plot(a_time, out_trunc)
+            plt.legend(["channel 0", "beamformer output", "speech reference"])
+            
+            # SIGNAL IN FREQ DOMAIN
+            n_frames_n = np.sum(np.mean(np.abs(X_noise)[...,0], axis=1) > 1e-6 ) # number of frame where noise is active
+            n_frames_s = np.sum(np.mean(np.abs(X_speech)[...,0], axis=1) > 1e-6 )
+            X_n_freq = np.sum(np.abs(X_noise[...,0])**2, axis=0) / n_frames_n
+            X_s_freq = np.sum(np.abs(X_speech[...,0])**2, axis=0) / n_frames_s
+            
+            freqs_to_plot = [125.0, 218.75, 406.25, 500.0, 718.75, 1218.75] # Hz, manual
+            plt.figure()
+            plt.semilogy(freqs, X_n_freq, label='noise')
+            plt.semilogy(freqs, X_s_freq, label='speech')
+            for freq in freqs_to_plot:
+                plt.axvline(x=freq, color='r', linestyle='--')
+            plt.xlim([0, 2000])
+            plt.legend()        
+            plt.title('Spectrum of the signals, channel 0, salient frequencies')
 
-        plt.figure()
-        mic_array.plot_beam_response()
-        plt.vlines(
-            [180 + np.degrees(theta_speech), 180 - np.degrees(theta_noise)],
-            0,
-            nfft // 2,
-        )
+            plt.figure()
+            mic_array.plot_beam_response()
+            plt.vlines(
+                [180 + np.degrees(theta_speech), 180 - np.degrees(theta_noise)],
+                0,
+                nfft // 2,
+            )
+                    
+            # plot beamformer weights
+            theta = np.deg2rad(np.arange(-180, 180, 1))
+            vect_doa_src = np.stack([np.cos(theta), np.sin(theta), np.zeros_like(theta)])
+            vect_mics = room.mic_array.R
+            toas_far_free = vect_doa_src.T @ vect_mics / room.c # nDoas x nChan
+            svects = np.exp(- 1j * 2 * np.pi * freqs[:,None,None] * (toas_far_free[None,...])) #  nFreq x nDoas x nChan
+            
+            bf_freq_abs = np.abs(np.einsum('fm,fsm->fs', w, svects))**2
+            bf_freq_abs /= np.max(bf_freq_abs)
+            
+            fig_pol, axarr_pol = plt.subplots(1, 2, figsize=(8,4), sharey=True, subplot_kw={'projection': 'polar'})
+            fig_lin, axarr_lin = plt.subplots(1, 2, figsize=(8,4), sharey=True)
+
+            mean_bf_abs = np.mean(bf_freq_abs, axis=0)
+            mean_bf_abs /= np.max(mean_bf_abs)
+
+            for src_idx, src_name in zip([0, 1], ['target', 'interf']):
+
+                doas_ = source_echoes[src_idx]['doas']
+                coeff_ = source_echoes[src_idx]['coeffs']
+                coeff_ /= np.max(np.abs(coeff_))
+                walls_ = source_echoes[src_idx]['walls']
+                order_ = source_echoes[src_idx]['order']
+
+                axarr_pol[src_idx].plot(theta, mean_bf_abs, label='BF')
+                axarr_lin[src_idx].plot(theta, mean_bf_abs, label='BF')
+                for d, (doa, coeff, wall) in enumerate(zip(doas_, coeff_, walls_)):
+                    
+                    # skip ceiling and floor for viz
+                    if wall in ['ceiling', 'floor']:
+                        continue
+                    
+                    doa = doa if doa < np.pi else doa - 2*np.pi
+                    axarr_pol[src_idx].arrow(doa, 0, 0, coeff, width = 0.015, edgecolor = 'black', facecolor = 'C0', lw = 1, zorder = 5)
+                    axarr_pol[src_idx].text(doa, coeff + 0.1, f"{d} - {wall}", fontsize=8, ha='center', va='center')
+                    
+                    # add text on the tip of the arrow
+                    axarr_lin[src_idx].arrow(doa, 0, 0, coeff, width = 0.015, edgecolor = 'black', facecolor = 'C0', lw = 1, zorder = 5)
+                    axarr_lin[src_idx].text(doa, coeff + 0.1, f"{d} - {wall}", fontsize=8, ha='center', va='center')
+
+                axarr_lin[src_idx].set_title('{} DOAs'.format(src_name))
+                axarr_pol[src_idx].set_title('{} DOAs'.format(src_name))
+
+            fig_pol.suptitle("Beamforming directivity pattern vs sources' DOAs")
+            fig_lin.suptitle("Beamforming directivity pattern vs sources' DOAs")
+            fig_lin.legend()
+            fig_pol.legend()
+            fig_lin.tight_layout()
+            fig_pol.tight_layout()
+            
+            def generate_axes(fig):
+                gridspec = fig.add_gridspec(nrows=24, ncols=12)
+                axes = {}
+                axes['spec'] = fig.add_subplot(gridspec[0:24, 0:2])
                 
-        # plot beamformer weights
-        theta = np.deg2rad(np.arange(-180, 180, 1))
-        vect_doa_src = np.stack([np.cos(theta), np.sin(theta), np.zeros_like(theta)])
-        vect_mics = room.mic_array.R
-        toas_far_free = vect_doa_src.T @ vect_mics / room.c # nDoas x nChan
-        svects = np.exp(- 1j * 2 * np.pi * freqs[:,None,None] * (toas_far_free[None,...])) #  nFreq x nDoas x nChan
-        
-        bf_freq_abs = np.abs(np.einsum('fm,fsm->fs', w, svects))**2
-        bf_freq_abs /= np.max(bf_freq_abs)
-        
-        
-        fig_pol, axarr_pol = plt.subplots(1, 2, figsize=(8,4), sharey=True, subplot_kw={'projection': 'polar'})
-        fig_lin, axarr_lin = plt.subplots(1, 2, figsize=(8,4), sharey=True)
+                axes['lin_doas6'] = fig.add_subplot(gridspec[0:4, 2:8])
+                axes['pol_doas6'] = fig.add_subplot(gridspec[0:4, 8:10], projection='polar')
+                axes['pol_doas6b'] = fig.add_subplot(gridspec[0:4, 10:12], projection='polar')
+                axes['lin_doas5'] = fig.add_subplot(gridspec[4:8, 2:8])
+                axes['pol_doas5'] = fig.add_subplot(gridspec[4:8, 8:10], projection='polar')
+                axes['pol_doas5b'] = fig.add_subplot(gridspec[4:8, 10:12], projection='polar')
+                axes['lin_doas4'] = fig.add_subplot(gridspec[8:12, 2:8])
+                axes['pol_doas4'] = fig.add_subplot(gridspec[8:12, 8:10], projection='polar')
+                axes['pol_doas4b'] = fig.add_subplot(gridspec[8:12, 10:12], projection='polar')
+                axes['lin_doas3'] = fig.add_subplot(gridspec[12:16, 2:8])
+                axes['pol_doas3'] = fig.add_subplot(gridspec[12:16, 8:10], projection='polar')
+                axes['pol_doas3b'] = fig.add_subplot(gridspec[12:16, 10:12], projection='polar')
+                axes['lin_doas2'] = fig.add_subplot(gridspec[16:20, 2:8])
+                axes['pol_doas2'] = fig.add_subplot(gridspec[16:20, 8:10], projection='polar')
+                axes['pol_doas2b'] = fig.add_subplot(gridspec[16:20, 10:12], projection='polar')
+                axes['lin_doas1'] = fig.add_subplot(gridspec[20:24, 2:8])
+                axes['pol_doas1'] = fig.add_subplot(gridspec[20:24, 8:10], projection='polar')
+                axes['pol_doas1b'] = fig.add_subplot(gridspec[20:24, 10:12], projection='polar')
+                return axes
 
-        mean_bf_abs = np.mean(bf_freq_abs, axis=0)
-        mean_bf_abs /= np.max(mean_bf_abs)
+            fig = plt.figure(figsize=(16, 12))
+            axes = generate_axes(fig)
+            axes['spec'].semilogx(X_n_freq, freqs, label='Noise PSD')
+            axes['spec'].semilogx(X_s_freq, freqs, label='Speech PSD')
+            axes['spec'].invert_xaxis()
+            axes['spec'].set_ylim([100, 2000])
+            axes['spec'].legend(loc="upper right")
 
-        for src_idx, src_name in zip([0, 1], ['target', 'interf']):
+            for f, freq in enumerate(freqs_to_plot):
+                freq_idx = np.argmin(np.abs(freqs - freq))
+                curr_bf = bf_freq_abs[freq_idx]
+                curr_bf_normalized = curr_bf / np.max(curr_bf)
+                axes[f'lin_doas{f+1}'].plot(np.rad2deg(theta), curr_bf, 'C0', label=f'BF at {freq:.0f} Hz')
+                axes[f'lin_doas{f+1}'].plot(np.rad2deg(theta), curr_bf_normalized, 'C0--', label=f'BF normalized', alpha=0.5)
+                
+                axes[f'pol_doas{f+1}'].plot(theta, curr_bf, 'C0', label=f'{freq:.0f} Hz')
+                axes[f'pol_doas{f+1}'].plot(theta, curr_bf_normalized, 'C0--', label=f'{freq:.0f} Hz, normalized', alpha=0.5)
+                axes[f'pol_doas{f+1}b'].plot(theta, curr_bf, 'C0', label=f'{freq:.0f} Hz')
+                axes[f'pol_doas{f+1}b'].plot(theta, curr_bf_normalized, 'C0--', label=f'{freq:.0f} Hz, normalized', alpha=0.5)
+                
+                axes[f'pol_doas{f+1}'].set_xticks([])
+                axes[f'pol_doas{f+1}'].set_yticks([])
+                axes[f'pol_doas{f+1}b'].set_xticks([])
+                axes[f'pol_doas{f+1}b'].set_yticks([])
+                
+                for s, src_name, color, plot in zip([0, 1], ['target', 'interf'], ['C0', 'C1'], ['', 'b']):
+                    doas_ = source_echoes[s]['doas']
+                    doas_[doas_ > np.pi] -= 2*np.pi
+                    coeff_ = source_echoes[s]['coeffs']
+                    coeff_ /= np.max(coeff_)
+                    walls_ = source_echoes[s]['walls']
+                    for i, (doa, coeff, wall) in enumerate(zip(doas_, coeff_, walls_)):
+                        # skip ceiling and floor for viz
+                        if wall in ['ceiling', 'floor']:
+                            continue
+                        if i == 0:
+                            axes[f'pol_doas{f+1}{plot}'].arrow(doa, 0, 0, coeff, width = 0.015, edgecolor = color, facecolor = color, lw = 1, zorder = 5, label=src_name)
+                        else:
+                            axes[f'pol_doas{f+1}{plot}'].arrow(doa, 0, 0, coeff, width = 0.015, edgecolor = color, facecolor = color, lw = 1, zorder = 5)
+                    
+                    axes[f'lin_doas{f+1}'].stem(np.rad2deg(doas_), coeff_, 
+                                                markerfmt=f'{color}^', 
+                                                linefmt=f'{color}',
+                                                basefmt=' ', label=src_name)
+                            
+                axes[f'lin_doas{f+1}'].legend(loc='upper center', ncols=3)
+                
+                if f == len(freqs_to_plot) - 1:
+                    axes[f'pol_doas{f+1}'].set_title(f"{freq:.0f} Hz - target's DOAs")
+                    axes[f'pol_doas{f+1}b'].set_title(f"{freq:.0f} Hz - interf's DOAs")
+                else:
+                    axes[f'pol_doas{f+1}'].set_title(f"{freq:.0f} Hz")
+                    axes[f'pol_doas{f+1}b'].set_title(f"{freq:.0f} Hz")
+                
+                axes['spec'].axhline(freq, color='k', linestyle='--')
+                axes['spec'].text(0.04, freq, f"{freq:.0f} Hz", ha='center', va='bottom')
 
-            doas_ = source_echoes[src_idx]['doas']
-            coeff_ = source_echoes[src_idx]['coeffs']
-            coeff_ /= np.max(np.abs(coeff_))
+            axes[f'pol_doas6'].set_title(f"{freq:.0f} Hz - {src_name}'s DOAs")
+            axes[f'pol_doas6b'].set_title(f"{freq:.0f} Hz - {src_name}'s DOAs")
 
-            axarr_pol[src_idx].plot(theta, mean_bf_abs, label='BF')
-            axarr_lin[src_idx].plot(theta, mean_bf_abs, label='BF')
-            for d, (doa, coeff) in enumerate(zip(doas_, coeff_)):
-                # doa = doa if doa < np.pi else doa - 2*np.pi
-                axarr_pol[src_idx].arrow(doa, 0, 0, coeff, width = 0.015, edgecolor = 'black', facecolor = 'C0', lw = 1, zorder = 5)
-                # add text on the tip of the arrow
-                axarr_lin[src_idx].arrow(doa, 0, 0, coeff, width = 0.015, edgecolor = 'black', facecolor = 'C0', lw = 1, zorder = 5)
-                axarr_lin[src_idx].text(doa, coeff + 0.1, f"{d}", fontsize=8, ha='center', va='center')
-
-            axarr_lin[src_idx].set_title('{} DOAs'.format(src_name))
-            axarr_pol[src_idx].set_title('{} DOAs'.format(src_name))
-
-        fig_pol.suptitle("Beamforming dierctivity pattern vs sources' DOAs")
-        fig_lin.suptitle("Beamforming dierctivity pattern vs sources' DOAs")
-        fig_lin.legend()
-        fig_pol.legend()
-        fig_lin.tight_layout()
-        fig_pol.tight_layout()
-        
-        def generate_axes(fig):
-            gridspec = fig.add_gridspec(nrows=24, ncols=12)
-            axes = {}
-            axes['spec'] = fig.add_subplot(gridspec[0:24, 0:2])
+            plt.suptitle(f'Beamforming directivity pattern vs sources DOAs at {SIR} dB')
+            plt.tight_layout()            
             
-            axes['lin_doas6'] = fig.add_subplot(gridspec[0:4, 2:8])
-            axes['pol_doas6'] = fig.add_subplot(gridspec[0:4, 8:10], projection='polar')
-            axes['pol_doas6b'] = fig.add_subplot(gridspec[0:4, 10:12], projection='polar')
-            axes['lin_doas5'] = fig.add_subplot(gridspec[4:8, 2:8])
-            axes['pol_doas5'] = fig.add_subplot(gridspec[4:8, 8:10], projection='polar')
-            axes['pol_doas5b'] = fig.add_subplot(gridspec[4:8, 10:12], projection='polar')
-            axes['lin_doas4'] = fig.add_subplot(gridspec[8:12, 2:8])
-            axes['pol_doas4'] = fig.add_subplot(gridspec[8:12, 8:10], projection='polar')
-            axes['pol_doas4b'] = fig.add_subplot(gridspec[8:12, 10:12], projection='polar')
-            axes['lin_doas3'] = fig.add_subplot(gridspec[12:16, 2:8])
-            axes['pol_doas3'] = fig.add_subplot(gridspec[12:16, 8:10], projection='polar')
-            axes['pol_doas3b'] = fig.add_subplot(gridspec[12:16, 10:12], projection='polar')
-            axes['lin_doas2'] = fig.add_subplot(gridspec[16:20, 2:8])
-            axes['pol_doas2'] = fig.add_subplot(gridspec[16:20, 8:10], projection='polar')
-            axes['pol_doas2b'] = fig.add_subplot(gridspec[16:20, 10:12], projection='polar')
-            axes['lin_doas1'] = fig.add_subplot(gridspec[20:24, 2:8])
-            axes['pol_doas1'] = fig.add_subplot(gridspec[20:24, 8:10], projection='polar')
-            axes['pol_doas1b'] = fig.add_subplot(gridspec[20:24, 10:12], projection='polar')
-            return axes
-
-        fig = plt.figure(figsize=(16, 12))
-        axes = generate_axes(fig)
-        axes['spec'].semilogx(X_n_freq, freqs, label='Noise PSD')
-        axes['spec'].semilogx(X_s_freq, freqs, label='Speech PSD')
-        axes['spec'].invert_xaxis()
-        axes['spec'].set_ylim([100, 2000])
-        axes['spec'].legend(loc="upper right")
-
-        for f, freq in enumerate(freqs_to_plot):
-            freq_idx = np.argmin(np.abs(freqs - freq))
-            curr_bf = bf_freq_abs[freq_idx]
-            curr_bf_normalized = curr_bf / np.max(curr_bf)
-            axes[f'lin_doas{f+1}'].plot(np.rad2deg(theta), curr_bf, 'C0', label=f'BF at {freq:.0f} Hz')
-            axes[f'lin_doas{f+1}'].plot(np.rad2deg(theta), curr_bf_normalized, 'C0--', label=f'BF normalized', alpha=0.5)
+            ## PLOT 2D ROOM WITH IMAGES
+            fig, ax = plt.subplots()
+            plt.scatter(room.mic_array.center[0], room.mic_array.center[1], c='C0', marker='x', label='pyr')
             
-            axes[f'pol_doas{f+1}'].plot(theta, curr_bf, 'C0', label=f'{freq:.0f} Hz')
-            axes[f'pol_doas{f+1}'].plot(theta, curr_bf_normalized, 'C0--', label=f'{freq:.0f} Hz, normalized', alpha=0.5)
-            axes[f'pol_doas{f+1}b'].plot(theta, curr_bf, 'C0', label=f'{freq:.0f} Hz')
-            axes[f'pol_doas{f+1}b'].plot(theta, curr_bf_normalized, 'C0--', label=f'{freq:.0f} Hz, normalized', alpha=0.5)
-            
-            axes[f'pol_doas{f+1}'].set_xticks([])
-            axes[f'pol_doas{f+1}'].set_yticks([])
-            axes[f'pol_doas{f+1}b'].set_xticks([])
-            axes[f'pol_doas{f+1}b'].set_yticks([])
-            
-            for s, src_name, color, plot in zip([0, 1], ['target', 'interf'], ['C0', 'C1'], ['', 'b']):
-                doas_ = source_echoes[s]['doas']
-                doas_[doas_ > np.pi] -= 2*np.pi
-                coeff_ = source_echoes[s]['coeffs']
-                coeff_ /= np.max(coeff_)
-                for i, (doa, coeff) in enumerate(zip(doas_, coeff_)):
-                    if i == 0:
-                        axes[f'pol_doas{f+1}{plot}'].arrow(doa, 0, 0, coeff, width = 0.015, edgecolor = color, facecolor = color, lw = 1, zorder = 5, label=src_name)
+            source_color = ['C1', 'C3']
+            source_name = ['target', 'interf']
+            for j in range(len(room.sources)):
+                plt.scatter(room.sources[j].position[0], room.sources[j].position[1], c=source_color[j], label=source_name[j])
+                for n in range(len(source_echoes[j]['images'][0])):
+                    if n == 0:
+                        plt.scatter(source_echoes[j]['images'][0,n], source_echoes[j]['images'][1,n], c=source_color[j], alpha=0.5, label='target')
                     else:
-                        axes[f'pol_doas{f+1}{plot}'].arrow(doa, 0, 0, coeff, width = 0.015, edgecolor = color, facecolor = color, lw = 1, zorder = 5)
-                
-                axes[f'lin_doas{f+1}'].stem(np.rad2deg(doas_), coeff_, 
-                                            markerfmt=f'{color}^', 
-                                            linefmt=f'{color}',
-                                            basefmt=' ', label=src_name)
-                        
-            axes[f'lin_doas{f+1}'].legend(loc='upper center', ncols=3)
+                        plt.scatter(source_echoes[j]['images'][0,n], source_echoes[j]['images'][1,n], c=source_color[j], alpha=0.5)
+                    # for each image, add the name of the wall as text from the list source_echoes[j]['walls'][n]
+                    plt.text(source_echoes[j]['images'][0,n], source_echoes[j]['images'][1,n], source_echoes[j]['walls'][n], fontsize=8)
+                    
+            rect = patches.Rectangle((0, 0), room_dim[0], room_dim[1], linewidth=1, edgecolor='r', facecolor='none')
+            ax.add_patch(rect)
+            plt.legend()
+
+            # spectrograms
+            fig, ax = plt.subplots(figsize=(12, 4))
+            img = lr.display.specshow(lr.amplitude_to_db(np.abs(X_speech[...,0].T), ref=np.max), y_axis='log', x_axis='time', ax=ax, sr=fs)
+            ax.set_title('X_speech')
+            fig.colorbar(img, ax=ax, format="%+2.0f dB")
+
+            fig, ax = plt.subplots(figsize=(12, 4))
+            img = lr.display.specshow(lr.amplitude_to_db(np.abs(X_noise[...,0].T), ref=np.max), y_axis='log', x_axis='time', ax=ax, sr=fs)
+            ax.set_title('X_noise')
+            fig.colorbar(img, ax=ax, format="%+2.0f dB")
+        
+            ## PLOT 3D BEAMFORMER RADIATION PATTERN
+            azimuth = np.linspace(0, 2 * np.pi, 100)
+            elevation = np.linspace(0, np.pi, 50)
+            # Create a grid for azimuth and elevation
+            azimuth, elevation = np.meshgrid(azimuth, elevation)
+            mesh_shape = azimuth.shape
+            azimuth = azimuth.flatten()
+            elevation = elevation.flatten()
+            vect_doa_src = np.stack([np.cos(azimuth) * np.sin(elevation), np.sin(azimuth) * np.sin(elevation), np.cos(elevation)])
+            vect_mics = room.mic_array.R
+            toas_far_free = vect_doa_src.T @ vect_mics / room.c # nDoas x nChan
+            svects = np.exp(- 1j * 2 * np.pi * freqs[:,None,None] * (toas_far_free[None,...])) #  nFreq x nDoas x nChan
             
-            if f == len(freqs_to_plot) - 1:
-                axes[f'pol_doas{f+1}'].set_title(f"{freq:.0f} Hz - target's DOAs")
-                axes[f'pol_doas{f+1}b'].set_title(f"{freq:.0f} Hz - interf's DOAs")
-            else:
-                axes[f'pol_doas{f+1}'].set_title(f"{freq:.0f} Hz")
-                axes[f'pol_doas{f+1}b'].set_title(f"{freq:.0f} Hz")
+            # Assuming a unit sphere for visualization
+            r = np.abs(np.einsum('fm,fsm->fs', bf_weights, svects))**2
+            r = np.mean(r, axis=0)
+            r /= np.max(r)
+                    
+            # Convert spherical coordinates to Cartesian coordinates
+            X = r * np.sin(elevation) * np.cos(azimuth)
+            Y = r * np.sin(elevation) * np.sin(azimuth)
+            Z = r * np.cos(elevation)
             
-            axes['spec'].axhline(freq, color='k', linestyle='--')
-            axes['spec'].text(0.04, freq, f"{freq:.0f} Hz", ha='center', va='bottom')
+            fig = plt.figure(figsize=(12, 6))
+            ax = fig.add_subplot(111, projection='3d')
 
-        axes[f'pol_doas6'].set_title(f"{freq:.0f} Hz - {src_name}'s DOAs")
-        axes[f'pol_doas6b'].set_title(f"{freq:.0f} Hz - {src_name}'s DOAs")
+            # Plot the surface
+            ax.plot_surface(
+                X.reshape(*mesh_shape),
+                Y.reshape(*mesh_shape),
+                Z.reshape(*mesh_shape),
+                facecolors=plt.cm.viridis(r.reshape(*mesh_shape)), 
+                rstride=1, cstride=1, alpha=0.8
+            )
+            
+            N = np.sqrt(X**2 + Y**2 + Z**2)
+            Rmax = np.max(N)
+            axes_length = 0.65
+            ax.plot([0, axes_length*Rmax], [0, 0], [0, 0], linewidth=2, color='red')
+            ax.plot([0, 0], [0, axes_length*Rmax], [0, 0], linewidth=2, color='green')
+            ax.plot([0, 0], [0, 0], [0, axes_length*Rmax], linewidth=2, color='blue')
 
-        plt.suptitle(f'Beamforming directivity pattern vs sources DOAs at {SIR} dB')
-        plt.tight_layout()
+            # Customize the plot
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+            ax.set_title('3D Beamforming Weights')
         
-        # plt.figure(figsize=(6,6))
-        # plt.subplot(111, polar=True)
-        # plt.title('Target DOAs')
-
-        # # freqs_to_plot = [100, 300, 500, 1000]
-        # idx_freqs = [np.argmin(np.abs(f - freqs)) for f in freqs_to_plot]
-
-        # for f in idx_freqs:
-        #     plt.plot(theta, bf_freq[f], label=f'{freqs[f]:.0f} Hz')
-        # plt.legend()
-
-        # doas_, coeff_ = sources_doas_energy['target']
-        # for doa, coeff in zip(doas_, coeff_):
-        #     plt.arrow(doa, 0, 0, 2.5*coeff, width = 0.015, edgecolor = 'black', facecolor = 'C0', lw = 1.2, zorder = 5)
+        ## Correlation plots
+        fig, axarr = plt.subplots(2, 1, figsize=(12, 8))
         
-        
-        # plot 2D room with images
-        fig, ax = plt.subplots()
-        plt.scatter(room.mic_array.center[0], room.mic_array.center[1], c='C0', marker='x', label='pyr')
-        
-        plt.scatter(room.sources[0].position[0], room.sources[0].position[1], c='C1')
-        plt.scatter(source_echoes[0]['images'][0], source_echoes[0]['images'][1], c='C1', alpha=0.5, label='target')
-        
-        plt.scatter(room.sources[1].position[0], room.sources[1].position[1], c='C3')
-        plt.scatter(source_echoes[1]['images'][0], source_echoes[1]['images'][1], c='C3', alpha=0.5, label='interf')
-        
-        rect = patches.Rectangle((0, 0), room_dim[0], room_dim[1], linewidth=1, edgecolor='r', facecolor='none')
-        ax.add_patch(rect)
-        plt.legend()
-
-        # spectrograms
-        fig, ax = plt.subplots(figsize=(12, 4))
-        img = lr.display.specshow(lr.amplitude_to_db(np.abs(X_speech[...,0].T), ref=np.max), y_axis='log', x_axis='time', ax=ax, sr=fs)
-        ax.set_title('X_speech')
-        fig.colorbar(img, ax=ax, format="%+2.0f dB")
-
-        fig, ax = plt.subplots(figsize=(12, 4))
-        img = lr.display.specshow(lr.amplitude_to_db(np.abs(X_noise[...,0].T), ref=np.max), y_axis='log', x_axis='time', ax=ax, sr=fs)
-        ax.set_title('X_noise')
-        fig.colorbar(img, ax=ax, format="%+2.0f dB")
+        fig.suptitle('Correlation between steering vectors and weights for given angles')
+        source_name = ['target', 'interf']
+        for j in range(len(room.sources)):
+            images_ = source_echoes[j]['images']
+            doas_ = source_echoes[j]['doas']
+            coeff_ = source_echoes[j]['coeffs']
+            walls_ = source_echoes[j]['walls']
+            order_ = source_echoes[j]['order']
+            
+            N = images_.shape[1]
+            
+            vect_doas = images_ / np.linalg.norm(images_, axis=0)
+            vect_mics = room.mic_array.R
+            toas_far_free = vect_doas.T @ vect_mics / room.c # nDoas x nChan
+            svects = np.exp(- 1j * 2 * np.pi * freqs[:,None,None] * (toas_far_free[None,...])) #  nFreq x nDoas x nChan
+            
+            correlation = np.abs(np.einsum('fm,fsm->fs', bf_weights, svects))**2 / (np.linalg.norm(bf_weights, axis=1)[:,None] * np.linalg.norm(svects, axis=2)) # [nFreq x nDoas]
+            
+            img = axarr[j].imshow(correlation, aspect='auto', origin='lower', interpolation='nearest')
+            plt.colorbar(img, ax=axarr[j])
+            
+            axarr[j].set_xlabel('DOAs "wall - order"')
+            axarr[j].set_xticks(np.arange(N))
+            axarr[j].set_xticklabels([f"{walls_[i]} - {order_[i]}" for i in range(N)], rotation=45, ha='right')
+            
+            axarr[j].set_ylabel('Freqs index')
+            axarr[j].set_title(source_name[j])
+        fig.tight_layout()
         
         # plot all the plots
-        plt.show()
+        plt.show()        
 
         
     # Return SDR and SIR
