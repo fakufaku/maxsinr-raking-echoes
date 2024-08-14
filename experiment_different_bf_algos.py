@@ -247,16 +247,19 @@ def process_experiment_max_sinr(SIR, mic, args):
 
     room = pra.ShoeBox(room_dim, fs=fs, materials=pra.Material(e_absorption), max_order=max_order)
     room.add_source(speech_loc) # speech
+    room.sources[-1].name = 'target'
     room.add_source(noise_loc) # noise
+    room.sources[-1].name = 'interf'
     room.add_microphone_array(pra.MicrophoneArray(mics_positions.T, fs=room.fs))
     
     room.compute_rir()
     
     # compute sources' image information
     source_echoes = []
-    n_images = 2000
+    n_images = 200
     for s, source in enumerate(room.sources):
     
+        name = source.name
         src_images_pos =  room.sources[s].images
         src_images_order = room.sources[s].orders
         src_images_dampings = room.sources[s].damping.squeeze()
@@ -270,7 +273,7 @@ def process_experiment_max_sinr(SIR, mic, args):
         src_images_order = src_images_order[idx]
         src_images_dampings = src_images_dampings[idx]
         
-        # # remove the images that are not on the x-y plane
+        # # # remove the images that are not on the x-y plane
         # src_images_z = src_images_pos[2,:]
         # idx = np.where(np.abs(src_images_z - src_images_z[0]) < 1e-6 )[0]
         
@@ -304,6 +307,7 @@ def process_experiment_max_sinr(SIR, mic, args):
         toas_images = src_images_dist / room.c
 
         source_echoes.append({
+            "name" : name,
             "coeffs" : coeff,
             "doas" : doas_images,
             "toas" : toas_images,
@@ -336,7 +340,6 @@ def process_experiment_max_sinr(SIR, mic, args):
         for rs, rn in zip(Rs[1:], Rn[1:])
     ]
     w = np.squeeze(np.array(w))
-    print(w.shape)
     nw = la.norm(w, axis=1)
     w[nw > 1e-10, :] /= nw[nw > 1e-10, None]
     w = np.concatenate([np.ones((1, n_channels)), w], axis=0)
@@ -704,8 +707,11 @@ def process_experiment_max_sinr(SIR, mic, args):
         fig, axarr = plt.subplots(2, 1, figsize=(12, 8))
         
         fig.suptitle('Correlation between steering vectors and weights for given angles')
-        source_name = ['target', 'interf']
+        
         for j in range(len(room.sources)):
+            
+            name = source_echoes[j]['name']
+            assert name == room.sources[j].name
             images_ = source_echoes[j]['images']
             doas_ = source_echoes[j]['doas']
             coeff_ = source_echoes[j]['coeffs']
@@ -714,26 +720,30 @@ def process_experiment_max_sinr(SIR, mic, args):
             
             N = images_.shape[1]
             
-            vect_doas = images_ / np.linalg.norm(images_, axis=0)
-            vect_mics = room.mic_array.R
+            # freqs_to_plot = np.array([125.0, 218.75, 406.25, 500.0, 718.75, 1218.75]) # Hz, manual
+            vect_doas = images_ - room.mic_array.center
+            vect_doas = vect_doas / np.linalg.norm(vect_doas, axis=0)
             toas_far_free = vect_doas.T @ vect_mics / room.c # nDoas x nChan
-            svects = np.exp(- 1j * 2 * np.pi * freqs[:,None,None] * (toas_far_free[None,...])) #  nFreq x nDoas x nChan
+            svects = np.exp(- 1j * 2 * np.pi * freqs[:,None,None] * toas_far_free[None,...]) #  nFreq x nDoas x nChan
             
-            correlation = np.abs(np.einsum('fm,fsm->fs', bf_weights, svects)) / (np.linalg.norm(bf_weights, axis=1)[:,None] * np.linalg.norm(svects, axis=2)) # [nFreq x nDoas]
-            
-            img = axarr[j].imshow(correlation, aspect='auto', origin='lower', interpolation='nearest')
+            correlation = np.real(np.einsum('fm,fsm->fs', bf_weights, svects)) \
+                / (np.linalg.norm(bf_weights, axis=1)[:,None] * np.linalg.norm(svects, axis=2)) # [nFreq x nDoas]
+
+            img = axarr[j].imshow(np.abs(correlation), aspect='auto', origin='lower', interpolation='nearest')
             plt.colorbar(img, ax=axarr[j])
+            # axarr[j].plot(np.arange(N), np.sum(correlation, axis=0))
             
             axarr[j].set_xlabel('DOAs "wall - order"')
             axarr[j].set_xticks(np.arange(N))
             axarr[j].set_xticklabels([f"{walls_[i]} - {order_[i]}" for i in range(N)], rotation=45, ha='right')
             
             axarr[j].set_ylabel('Freqs index')
-            axarr[j].set_title(source_name[j])
+            axarr[j].set_title(name)
+            
         fig.tight_layout()
         
         # plot all the plots
-        plt.show()        
+        plt.show()
 
         
     # Return SDR and SIR
