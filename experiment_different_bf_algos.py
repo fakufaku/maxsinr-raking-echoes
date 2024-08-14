@@ -719,7 +719,7 @@ def process_experiment_max_sinr(SIR, mic, args):
             toas_far_free = vect_doas.T @ vect_mics / room.c # nDoas x nChan
             svects = np.exp(- 1j * 2 * np.pi * freqs[:,None,None] * (toas_far_free[None,...])) #  nFreq x nDoas x nChan
             
-            correlation = np.abs(np.einsum('fm,fsm->fs', bf_weights, svects))**2 / (np.linalg.norm(bf_weights, axis=1)[:,None] * np.linalg.norm(svects, axis=2)) # [nFreq x nDoas]
+            correlation = np.abs(np.einsum('fm,fsm->fs', bf_weights, svects)) / (np.linalg.norm(bf_weights, axis=1)[:,None] * np.linalg.norm(svects, axis=2)) # [nFreq x nDoas]
             
             img = axarr[j].imshow(correlation, aspect='auto', origin='lower', interpolation='nearest')
             plt.colorbar(img, ax=axarr[j])
