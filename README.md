@@ -16,10 +16,10 @@ python ./experiment_max_sinr.py 5 pyramic --plot
 ## Type of Beamformers
 
 - [x] MaxSIR (legacy)
-- [ ] Delay and sum (legacy)
-- [ ] MVDR (legacy)
+- [x] Delay and sum (legacy)
+- [x] MVDR (legacy)
 - [ ] Robust MVDR (legacy)
-- [ ] Souden MVDR (legacy)
+- [x] Souden MVDR (legacy)
 - [ ] LCMV (legacy)
 - [ ] Rake BF (pyroomacoustics)
 

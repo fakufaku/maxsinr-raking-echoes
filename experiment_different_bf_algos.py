@@ -16,12 +16,22 @@ import librosa as lr
 from mir_eval.separation import bss_eval_images
 from pprint import pprint
 from pathlib import Path
+import pandas as pd
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
 from max_sinr_beamforming import compute_gain
-from geo_utils import get_wall_order_from_images
+from beamformers import (
+    mvdr_weights, 
+    delay_and_sum_weights, 
+    souden_weights, 
+    max_sinr_weights, 
+    lcmv_weights,
+    rake_weights,
+    compute_steering_vector
+)
+from geo_utils import get_wall_order_from_images, distance
 
 experiment_folder = "datanet/projects/otohikari/robin/measurements/20171207"
 file_pattern = os.path.join(experiment_folder, "segmented/{}_{}_SIR_{}_dB.wav")
@@ -56,6 +66,20 @@ parser.add_argument(
     choices=mic_choices.keys(),
     help="Which input device to use",
 )
+parser.add_argument(
+    "--bf", 
+    type=str, 
+    default="maxsinr", 
+    help="type of beamformer to use",
+    choices=["ds", "maxsinr", "mvdr", "mvdr_robust", "mpdr", "souden", "lcmv", "rake"]
+)
+parser.add_argument(
+    "--mask", 
+    type=str, 
+    default="led", 
+    help="type of mask to use",
+    choices=["led", "oracle"]
+)
 parser.add_argument("--thresh", "-t", type=float, help="The threshold for VAD")
 parser.add_argument(
     "--nfft", type=int, default=1024, help="The FFT size to use for STFT"
@@ -81,7 +105,9 @@ parser.add_argument("--plot", action="store_true", help="Display all the figures
 parser.add_argument("--all", action="store_true", help="Process all the samples")
 
 
-def process_experiment_max_sinr(SIR, mic, args):
+def process_experiment(SIR, mic, bf, mask, args):
+
+    exp_name = f"{mic}_SIR_{SIR}_dB_{bf}_mask_{mask}"
 
     nfft = args.nfft
     vad_guard = args.vad_guard
@@ -183,7 +209,6 @@ def process_experiment_max_sinr(SIR, mic, args):
     )
     freqs = np.fft.rfftfreq(nfft, 1/fs)
     
-
     def analysis(x):
         engine.analysis(x)
         return engine.X
@@ -213,15 +238,23 @@ def process_experiment_max_sinr(SIR, mic, args):
         axarr[2].plot(mix[:, 0])
         axarr[2].set_title("Mix")
         plt.tight_layout()
+        plt.savefig(f'figures/{exp_name}-signals_reference.png')
         
     S_ref = pra.transform.stft.STFT(nfft, nfft // 2, pra.hann(nfft)).analysis(speech_ref_)
     N_ref = pra.transform.stft.STFT(nfft, nfft // 2, pra.hann(nfft)).analysis(noise_ref_)
-    oracle_mask = np.abs(S_ref) > 10 * np.mean(np.abs(S_ref)[:30,:], axis=0)
-    oracle_mask = np.abs(S_ref) / (np.abs(S_ref) + np.abs(N_ref))
+    # oracle_mask = np.abs(S_ref) > 20 * np.mean(np.abs(S_ref)[:20,:], axis=0)
+    # oracle_mask = S_ref * oracle_mask
+    oracle_mask = np.abs(S_ref)**2 / (np.abs(S_ref)**2 + np.abs(N_ref)**2)
     X_speech_oracle = X_mix * oracle_mask[:,:,None]
 
-    # X_speech = X_speech_oracle
-    # X_noise = X_mix - X_speech_oracle
+    if mask == 'oracle':
+        X_speech = X_speech_oracle
+        X_noise = X_mix - X_speech_oracle
+    elif mask == 'led':
+        X_speech = X_speech
+        X_noise = X_noise
+    else:
+        raise ValueError('Unknown mask type, should be "oracle" or "led", got {}'.format(args.mask))
     
     if args.plot:
         fig, ax = plt.subplots(4, 1, figsize=(12, 6), sharex=True)
@@ -234,6 +267,7 @@ def process_experiment_max_sinr(SIR, mic, args):
         img = lr.display.specshow(lr.amplitude_to_db(np.abs(X_speech_oracle[:,:,0].T), ref=np.max), y_axis='log', x_axis='time', ax=ax[3], sr=fs)
         ax[3].set_title('Masked mix')
         plt.tight_layout()
+        plt.savefig(f'figures/{exp_name}-spectra_reference.png')
 
     ###############
     ## MAKE ROOM ##
@@ -322,32 +356,54 @@ def process_experiment_max_sinr(SIR, mic, args):
     ## MAX SINR BEAMFORMING ##
     ##########################
 
-    print("Max SINR beamformer computation")
+    print(f"{bf} beamformer computation")
     sys.stdout.flush()
 
     # covariance matrices from noisy signal
+    Rx = np.einsum("i...j,i...k->...jk", X_mix, np.conj(X_mix)) / X_mix.shape[-1]
     Rs = np.einsum("i...j,i...k->...jk", X_speech, np.conj(X_speech)) / X_speech.shape[-1]
     Rn = np.einsum("i...j,i...k->...jk", X_noise, np.conj(X_noise)) / X_noise.shape[-1]
-    # Rs = Rs - Rn
 
     # compute the MaxSINR beamformer
-    w = [
-        la.eigh(
-            rs,
-            b=rn,
-            eigvals=(n_channels - 1, n_channels - 1),
-        )[1]
-        for rs, rn in zip(Rs[1:], Rn[1:])
-    ]
-    w = np.squeeze(np.array(w))
-    nw = la.norm(w, axis=1)
-    w[nw > 1e-10, :] /= nw[nw > 1e-10, None]
-    w = np.concatenate([np.ones((1, n_channels)), w], axis=0)
-
-    if not args.no_norm:
+    if bf == 'maxsinr':
+        w = max_sinr_weights(Rs[1:], Rn[1:])
+        
+        # Post processing of the weights
+        nw = la.norm(w, axis=1)
+        w[nw > 1e-10, :] /= nw[nw > 1e-10, None]
+        w = np.concatenate([np.ones((1, n_channels)), w], axis=0)
         # normalize with respect to input signal
         z = compute_gain(w, X_speech, X_speech[:, :, 0], clip_up=args.clip_gain)
         w *= z[:, None]
+        
+    elif bf == 'ds':
+        w = delay_and_sum_weights(room.sources[0].position[:,None], room.mic_array.R, room.c, freqs, 0)
+
+    elif bf == 'mvdr':
+        w = mvdr_weights(room.sources[0].position[:,None], room.mic_array.R, room.c, freqs[1:], Rn[1:], 0)
+        w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
+
+    elif bf == 'mpdr':
+        w = mvdr_weights(room.sources[0].position[:,None], room.mic_array.R, room.c, freqs[1:], Rx[1:], 0)
+        w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
+        
+    elif bf == 'lcmv':
+        w = lcmv_weights(
+            room.sources[0].position[:,None], 
+            room.sources[1].position[:,None], 
+            room.mic_array.R, room.c, freqs[1:], Rn[1:], 0, 0)
+        w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
+    
+    elif bf == 'rake':
+        w = rake_weights(
+            source_echoes[0]["images"][:,:5], 
+            room.mic_array.R, room.c, freqs[1:], Rn[1:], 0, 0)
+        w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
+        
+    elif bf == 'souden':
+        w = souden_weights(Rn[1:], Rs[1:], X_speech, 0, args.no_norm, args.clip_gain)
+        w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
+        
     bf_weights = w
 
     ###########
@@ -387,6 +443,20 @@ def process_experiment_max_sinr(SIR, mic, args):
     
     iSDR = SDR_out - SDR_in
     iSIR = SIR_out - SIR_in
+    
+    # write results to dict then to csv with pandas
+    results = {
+        "BF" : bf,
+        "mask" : mask,
+        "SIR_in": SIR_in,
+        "SDR_in": SDR_in,
+        "SIR_out": SIR_out,
+        "SDR_out": SDR_out,
+        "iSDR": iSDR,
+        "iSIR": iSIR,
+    }
+    df = pd.DataFrame(results, index=[0])
+    df.to_csv(f'results/{exp_name}.csv', header=True, index=False)
 
     print(f'SDR {SDR_in:.2f} --> {SDR_out:.2f} ==> improv: {iSDR:.2f}')
     print(f'SIR {SIR_in:.2f} --> {SIR_out:.2f} ==> improv: {iSIR:.2f}')
@@ -408,7 +478,7 @@ def process_experiment_max_sinr(SIR, mic, args):
 
         f1 = args.save_sample / "{}_ch0_SIR_{}_dB.wav".format(mic, SIR)
         wavfile.write(f1, fs_snd, sig_in)
-        f2 = args.save_sample / "{}_out_SIR_{}_dB.wav".format(mic, SIR)
+        f2 = args.save_sample / "{}_out_SIR_{}_dB_{}_{}.wav".format(mic, SIR, bf, mask)
         wavfile.write(f2, fs_snd, sig_out)
 
     ##########
@@ -429,6 +499,7 @@ def process_experiment_max_sinr(SIR, mic, args):
             plt.subplot(1,3,3)
             plt.scatter(mics_positions[:,1], mics_positions[:,2], c='r')
             plt.tight_layout()
+            plt.savefig(f'figures/{exp_name}-mics_positions.png')
 
             # SIGNAL
             plt.figure()
@@ -440,9 +511,10 @@ def process_experiment_max_sinr(SIR, mic, args):
             led_time = np.arange(leds.shape[0]) / fs_led + 1 / (2 * fs_led)
             mix_time = np.arange(n_samples) / fs_snd
 
-            plt.figure()
-            plt.plot(led_time, leds, "r")
-            plt.title("LED signal")
+            # plt.figure()
+            # plt.plot(led_time, leds, "r")
+            # plt.title("LED signal")
+            # plt.savefig(f'figures/{exp_name}-led.png')
 
             # match the scales of VAD and light to sound before plotting
             q_vad = np.max(mix)
@@ -455,12 +527,21 @@ def process_experiment_max_sinr(SIR, mic, args):
             plt.plot(mix_time, vad_guarded * q_vad, "g--")
             plt.legend(["mix", "VAD"])
             plt.title("LED and mix signals")
+            plt.savefig(f'figures/{exp_name}-led_and_mix_signals.png')
 
-            plt.figure()
+            fig, axarr = plt.subplots(4, 1, figsize=(12, 8), sharex=True)
             a_time = np.arange(mix.shape[0]) / fs_snd
-            plt.plot(a_time, mix[:, 0])
-            plt.plot(a_time, out_trunc)
-            plt.legend(["channel 0", "beamformer output", "speech reference"])
+            axarr[0].plot(a_time, mix[:, 0], alpha=0.5)
+            axarr[0].plot(a_time, out_trunc, alpha=0.5)
+            axarr[0].plot(a_time, speech_ref[:, 0], alpha=0.5)
+            axarr[0].legend(["channel 0", "beamformer output", "speech reference"])
+            axarr[1].plot(a_time, mix[:, 0])
+            axarr[1].set_title("Channel 0")
+            axarr[2].plot(a_time, out_trunc)
+            axarr[2].set_title("Beamformer output")
+            axarr[3].plot(a_time, speech_ref[:, 0])
+            axarr[3].set_title("Speech reference")
+            plt.savefig(f'figures/{exp_name}-ch0_and_bf_output.png')
             
             # SIGNAL IN FREQ DOMAIN
             n_frames_n = np.sum(np.mean(np.abs(X_noise)[...,0], axis=1) > 1e-6 ) # number of frame where noise is active
@@ -477,6 +558,7 @@ def process_experiment_max_sinr(SIR, mic, args):
             plt.xlim([0, 2000])
             plt.legend()        
             plt.title('Spectrum of the signals, channel 0, salient frequencies')
+            plt.savefig(f'figures/{exp_name}-spectra.png')
 
             plt.figure()
             mic_array.plot_beam_response()
@@ -485,22 +567,20 @@ def process_experiment_max_sinr(SIR, mic, args):
                 0,
                 nfft // 2,
             )
+            plt.savefig(f'figures/{exp_name}-beam_response.png')
                     
             # plot beamformer weights
             theta = np.deg2rad(np.arange(-180, 180, 1))
-            vect_doa_src = np.stack([np.cos(theta), np.sin(theta), np.zeros_like(theta)])
-            vect_mics = room.mic_array.R
-            toas_far_free = vect_doa_src.T @ vect_mics / room.c # nDoas x nChan
-            svects = np.exp(- 1j * 2 * np.pi * freqs[:,None,None] * (toas_far_free[None,...])) #  nFreq x nDoas x nChan
+            src_pos = 2*np.stack([np.cos(theta), np.sin(theta), np.zeros_like(theta)])
+            mic_pos = room.mic_array.R - room.mic_array.center
+            svects = compute_steering_vector(src_pos, mic_pos, room.c, freqs, ref_mic_idx=0)
             
-            bf_freq_abs = np.abs(np.einsum('fm,fsm->fs', w, svects))**2
-            bf_freq_abs /= np.max(bf_freq_abs)
+            bf_freq_abs = np.abs(np.einsum('fm,fsm->fs', w.conj(), svects))**2
             
             fig_pol, axarr_pol = plt.subplots(1, 2, figsize=(8,4), sharey=True, subplot_kw={'projection': 'polar'})
             fig_lin, axarr_lin = plt.subplots(1, 2, figsize=(8,4), sharey=True)
 
             mean_bf_abs = np.mean(bf_freq_abs, axis=0)
-            mean_bf_abs /= np.max(mean_bf_abs)
 
             for src_idx, src_name in zip([0, 1], ['target', 'interf']):
 
@@ -511,7 +591,10 @@ def process_experiment_max_sinr(SIR, mic, args):
                 order_ = source_echoes[src_idx]['order']
 
                 axarr_pol[src_idx].plot(theta, mean_bf_abs, label='BF')
+                axarr_pol[src_idx].plot(theta, np.ones_like(theta), 'k--', label='unit gain', alpha=0.5)
                 axarr_lin[src_idx].plot(theta, mean_bf_abs, label='BF')
+                axarr_lin[src_idx].plot(theta, np.ones_like(theta), 'k--', label='unit gain', alpha=0.5)
+                
                 for d, (doa, coeff, wall) in enumerate(zip(doas_, coeff_, walls_)):
                     
                     # skip ceiling and floor for viz
@@ -520,11 +603,11 @@ def process_experiment_max_sinr(SIR, mic, args):
                     
                     doa = doa if doa < np.pi else doa - 2*np.pi
                     axarr_pol[src_idx].arrow(doa, 0, 0, coeff, width = 0.015, edgecolor = 'black', facecolor = 'C0', lw = 1, zorder = 5)
-                    axarr_pol[src_idx].text(doa, coeff + 0.1, f"{d} - {wall}", fontsize=8, ha='center', va='center')
+                    axarr_pol[src_idx].text(doa, coeff, f"{d} - {wall}", fontsize=8, ha='center', va='center', alpha=0.7)
                     
                     # add text on the tip of the arrow
                     axarr_lin[src_idx].arrow(doa, 0, 0, coeff, width = 0.015, edgecolor = 'black', facecolor = 'C0', lw = 1, zorder = 5)
-                    axarr_lin[src_idx].text(doa, coeff + 0.1, f"{d} - {wall}", fontsize=8, ha='center', va='center')
+                    axarr_lin[src_idx].text(doa, coeff, f"{d} - {wall}", fontsize=8, ha='center', va='center', alpha=0.7)
 
                 axarr_lin[src_idx].set_title('{} DOAs'.format(src_name))
                 axarr_pol[src_idx].set_title('{} DOAs'.format(src_name))
@@ -535,6 +618,8 @@ def process_experiment_max_sinr(SIR, mic, args):
             fig_pol.legend()
             fig_lin.tight_layout()
             fig_pol.tight_layout()
+            fig_pol.savefig(f'figures/{exp_name}-beam_pattern_polar_2D.png')
+            fig_lin.savefig(f'figures/{exp_name}-beam_pattern_linear_2D.png')
             
             def generate_axes(fig):
                 gridspec = fig.add_gridspec(nrows=24, ncols=12)
@@ -575,11 +660,15 @@ def process_experiment_max_sinr(SIR, mic, args):
                 curr_bf_normalized = curr_bf / np.max(curr_bf)
                 axes[f'lin_doas{f+1}'].plot(np.rad2deg(theta), curr_bf, 'C0', label=f'BF at {freq:.0f} Hz')
                 axes[f'lin_doas{f+1}'].plot(np.rad2deg(theta), curr_bf_normalized, 'C0--', label=f'BF normalized', alpha=0.5)
+                axes[f'lin_doas{f+1}'].plot(np.rad2deg(theta), np.ones_like(theta), 'k--', label='unit gain', alpha=0.5)
                 
                 axes[f'pol_doas{f+1}'].plot(theta, curr_bf, 'C0', label=f'{freq:.0f} Hz')
                 axes[f'pol_doas{f+1}'].plot(theta, curr_bf_normalized, 'C0--', label=f'{freq:.0f} Hz, normalized', alpha=0.5)
+                axes[f'pol_doas{f+1}'].plot(theta, np.ones_like(theta), 'k--', label='unit gain', alpha=0.5)
+                
                 axes[f'pol_doas{f+1}b'].plot(theta, curr_bf, 'C0', label=f'{freq:.0f} Hz')
                 axes[f'pol_doas{f+1}b'].plot(theta, curr_bf_normalized, 'C0--', label=f'{freq:.0f} Hz, normalized', alpha=0.5)
+                axes[f'pol_doas{f+1}b'].plot(theta, np.ones_like(theta), 'k--', label='unit gain', alpha=0.5)
                 
                 axes[f'pol_doas{f+1}'].set_xticks([])
                 axes[f'pol_doas{f+1}'].set_yticks([])
@@ -605,10 +694,9 @@ def process_experiment_max_sinr(SIR, mic, args):
                                                 markerfmt=f'{color}^', 
                                                 linefmt=f'{color}',
                                                 basefmt=' ', label=src_name)
-                            
-                axes[f'lin_doas{f+1}'].legend(loc='upper center', ncols=3)
                 
                 if f == len(freqs_to_plot) - 1:
+                    axes[f'lin_doas{f+1}'].legend(loc='upper center', ncols=3)
                     axes[f'pol_doas{f+1}'].set_title(f"{freq:.0f} Hz - target's DOAs")
                     axes[f'pol_doas{f+1}b'].set_title(f"{freq:.0f} Hz - interf's DOAs")
                 else:
@@ -623,6 +711,7 @@ def process_experiment_max_sinr(SIR, mic, args):
 
             plt.suptitle(f'Beamforming directivity pattern vs sources DOAs at {SIR} dB')
             plt.tight_layout()            
+            plt.savefig(f'figures/{exp_name}-beam_pattern_per_freqs.png')
             
             ## PLOT 2D ROOM WITH IMAGES
             fig, ax = plt.subplots()
@@ -643,70 +732,74 @@ def process_experiment_max_sinr(SIR, mic, args):
             rect = patches.Rectangle((0, 0), room_dim[0], room_dim[1], linewidth=1, edgecolor='r', facecolor='none')
             ax.add_patch(rect)
             plt.legend()
+            plt.savefig(f'figures/{exp_name}-room_images.png')
 
             # spectrograms
             fig, ax = plt.subplots(figsize=(12, 4))
             img = lr.display.specshow(lr.amplitude_to_db(np.abs(X_speech[...,0].T), ref=np.max), y_axis='log', x_axis='time', ax=ax, sr=fs)
             ax.set_title('X_speech')
             fig.colorbar(img, ax=ax, format="%+2.0f dB")
+            plt.savefig(f'figures/{exp_name}-spetrum_speech.png')
 
             fig, ax = plt.subplots(figsize=(12, 4))
             img = lr.display.specshow(lr.amplitude_to_db(np.abs(X_noise[...,0].T), ref=np.max), y_axis='log', x_axis='time', ax=ax, sr=fs)
             ax.set_title('X_noise')
             fig.colorbar(img, ax=ax, format="%+2.0f dB")
+            plt.savefig(f'figures/{exp_name}-spetrum_noise.png')
         
-            ## PLOT 3D BEAMFORMER RADIATION PATTERN
-            azimuth = np.linspace(0, 2 * np.pi, 100)
-            elevation = np.linspace(0, np.pi, 50)
-            # Create a grid for azimuth and elevation
-            azimuth, elevation = np.meshgrid(azimuth, elevation)
-            mesh_shape = azimuth.shape
-            azimuth = azimuth.flatten()
-            elevation = elevation.flatten()
-            vect_doa_src = np.stack([np.cos(azimuth) * np.sin(elevation), np.sin(azimuth) * np.sin(elevation), np.cos(elevation)])
-            vect_mics = room.mic_array.R
-            toas_far_free = vect_doa_src.T @ vect_mics / room.c # nDoas x nChan
-            svects = np.exp(- 1j * 2 * np.pi * freqs[:,None,None] * (toas_far_free[None,...])) #  nFreq x nDoas x nChan
-            
-            # Assuming a unit sphere for visualization
-            r = np.abs(np.einsum('fm,fsm->fs', bf_weights, svects))**2
-            r = np.mean(r, axis=0)
-            r /= np.max(r)
-                    
-            # Convert spherical coordinates to Cartesian coordinates
-            X = r * np.sin(elevation) * np.cos(azimuth)
-            Y = r * np.sin(elevation) * np.sin(azimuth)
-            Z = r * np.cos(elevation)
-            
-            fig = plt.figure(figsize=(12, 6))
-            ax = fig.add_subplot(111, projection='3d')
+        ## PLOT 3D BEAMFORMER RADIATION PATTERN
+        azimuth = np.linspace(0, 2 * np.pi, 100)
+        elevation = np.linspace(0, np.pi, 50)
+        # Create a grid for azimuth and elevation
+        azimuth, elevation = np.meshgrid(azimuth, elevation)
+        mesh_shape = azimuth.shape
+        azimuth = azimuth.flatten()
+        elevation = elevation.flatten()
+        src_pos = 2*np.stack([np.cos(azimuth) * np.sin(elevation), np.sin(azimuth) * np.sin(elevation), np.cos(elevation)])
+        mic_pos = room.mic_array.R - room.mic_array.center
+        svects = compute_steering_vector(src_pos, mic_pos, room.c, freqs, ref_mic_idx=0) # nDoas x nChan
+        
+        # Assuming a unit sphere for visualization
+        r = np.abs(np.einsum('fm,fsm->fs', bf_weights.conj(), svects))**2
+        r = np.mean(r, axis=0)
+        r /= np.max(r)
+                
+        # Convert spherical coordinates to Cartesian coordinates
+        X = r * np.sin(elevation) * np.cos(azimuth)
+        Y = r * np.sin(elevation) * np.sin(azimuth)
+        Z = r * np.cos(elevation)
+        
+        fig = plt.figure(figsize=(6, 6))
+        ax = fig.add_subplot(111, projection='3d')
 
-            # Plot the surface
-            ax.plot_surface(
-                X.reshape(*mesh_shape),
-                Y.reshape(*mesh_shape),
-                Z.reshape(*mesh_shape),
-                facecolors=plt.cm.viridis(r.reshape(*mesh_shape)), 
-                rstride=1, cstride=1, alpha=0.8
-            )
-            
-            N = np.sqrt(X**2 + Y**2 + Z**2)
-            Rmax = np.max(N)
-            axes_length = 0.65
-            ax.plot([0, axes_length*Rmax], [0, 0], [0, 0], linewidth=2, color='red')
-            ax.plot([0, 0], [0, axes_length*Rmax], [0, 0], linewidth=2, color='green')
-            ax.plot([0, 0], [0, 0], [0, axes_length*Rmax], linewidth=2, color='blue')
+        # Plot the surface
+        ax.plot_surface(
+            X.reshape(*mesh_shape),
+            Y.reshape(*mesh_shape),
+            Z.reshape(*mesh_shape),
+            facecolors=plt.cm.viridis(r.reshape(*mesh_shape)), 
+            rstride=1, cstride=1, alpha=0.8
+        )
+        
+        N = np.sqrt(X**2 + Y**2 + Z**2)
+        Rmax = np.max(N)
+        axes_length = 0.65
+        ax.plot([0, axes_length*Rmax], [0, 0], [0, 0], linewidth=2, color='red')
+        ax.plot([0, 0], [0, axes_length*Rmax], [0, 0], linewidth=2, color='green')
+        ax.plot([0, 0], [0, 0], [0, axes_length*Rmax], linewidth=2, color='blue')
 
-            # Customize the plot
-            ax.set_xlabel('X')
-            ax.set_ylabel('Y')
-            ax.set_zlabel('Z')
-            ax.set_title('3D Beamforming Weights')
+        # Customize the plot
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.set_title('3D Beamforming Weights')
+        plt.tight_layout()
+        plt.savefig(f'figures/{exp_name}-beam_patterns_3D.png')
         
         ## Correlation plots
         fig, axarr = plt.subplots(2, 1, figsize=(12, 8))
         
-        fig.suptitle('Correlation between steering vectors and weights for given angles')
+        fig.suptitle('(ABS of) Correlation between steering vectors and weights for given angles')
         
         for j in range(len(room.sources)):
             
@@ -721,13 +814,12 @@ def process_experiment_max_sinr(SIR, mic, args):
             N = images_.shape[1]
             
             # freqs_to_plot = np.array([125.0, 218.75, 406.25, 500.0, 718.75, 1218.75]) # Hz, manual
-            vect_doas = images_ - room.mic_array.center
-            vect_doas = vect_doas / np.linalg.norm(vect_doas, axis=0)
-            toas_far_free = vect_doas.T @ vect_mics / room.c # nDoas x nChan
-            svects = np.exp(- 1j * 2 * np.pi * freqs[:,None,None] * toas_far_free[None,...]) #  nFreq x nDoas x nChan
-            
-            correlation = np.real(np.einsum('fm,fsm->fs', bf_weights, svects)) \
-                / (np.linalg.norm(bf_weights, axis=1)[:,None] * np.linalg.norm(svects, axis=2)) # [nFreq x nDoas]
+            ref_mic_idx = 0
+            src_pos = images_
+            mic_pos = room.mic_array.R
+            svects = compute_steering_vector(src_pos, mic_pos, room.c, freqs, ref_mic_idx=0) # Freq x nDoas x nChan
+            correlation = np.real(np.einsum('fm,fsm->fs', bf_weights.conj()[1:], svects[1:])) \
+                / (np.linalg.norm(bf_weights[1:], axis=1)[:,None] * np.linalg.norm(svects[1:], axis=2)) # [nFreq x nDoas]
 
             img = axarr[j].imshow(np.abs(correlation), aspect='auto', origin='lower', interpolation='nearest')
             plt.colorbar(img, ax=axarr[j])
@@ -741,10 +833,10 @@ def process_experiment_max_sinr(SIR, mic, args):
             axarr[j].set_title(name)
             
         fig.tight_layout()
+        plt.savefig(f'figures/{exp_name}-correlations.png')
         
         # plot all the plots
-        plt.show()
-
+        # plt.show()
         
     # Return SDR and SIR
     return SDR_out, SIR_out
@@ -759,10 +851,11 @@ if __name__ == "__main__":
         for mic in mic_choices.keys():
             results[mic] = {"SIR_in": [], "SIR_out": [], "SDR_out": []}
             for SIR in sir_choices:
-                results[mic]["SIR_in"].append(SIR)
-                sdr_o, sir_o = process_experiment_max_sinr(SIR, mic, args)
-                results[mic]["SIR_out"].append(sir_o)
-                results[mic]["SDR_out"].append(sdr_o)
+                for bf in bf_choices:
+                    results[mic]["SIR_in"].append(SIR)
+                    sdr_o, sir_o = process_experiment(SIR, mic, bf, args)
+                    results[mic]["SIR_out"].append(sir_o)
+                    results[mic]["SDR_out"].append(sdr_o)
 
         import datetime
 
@@ -791,9 +884,11 @@ if __name__ == "__main__":
         try:
             SIR = args.SIR
             mic = args.mic
+            bf = args.bf
+            mask = args.mask
         except:
             raise ValueError(
                 "When the keyword --all is not used, SIR and mic are required arguments"
             )
 
-        SDR_out, SIR_out = process_experiment_max_sinr(SIR, mic, args)
+        SDR_out, SIR_out = process_experiment(SIR, mic, bf, mask, args)

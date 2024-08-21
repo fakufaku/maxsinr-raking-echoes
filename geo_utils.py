@@ -130,7 +130,7 @@ def get_wall_order_from_images(src_images, mic_pos, room_dim, tolerance=1e-6):
         if n > 0: # first image is the direct path
             for wall_name, wall in walls.items():
                 intersecting_wall = line_plane_intersection(mic_pos, img, wall, tolerance)
-                print(f"IMG {img}: checking {wall_name} -> {intersecting_wall}")
+                # print(f"IMG {img}: checking {wall_name} -> {intersecting_wall}")
                 if intersecting_wall:
                     found_wall = wall_name
                     break
@@ -225,6 +225,15 @@ def square_within_plane(center, normal, size=(5,5)):
     B = B + center[:, None]
     return B
 
+def distance(x, y):
+    """
+    Computes the distance matrix E.
+    E[i,j] = sqrt(sum((x[:,i]-y[:,j])**2)).
+    x and y are DxN ndarray containing N D-dimensional vectors.
+    """
+    assert len(x.shape) == len(y.shape) == 2
+
+    return np.sqrt(np.sum((x[:, :, np.newaxis] - y[:, np.newaxis, :]) ** 2, axis=0))
 
 def rotation_matrix(a, b):
     # https://math.stackexchange.com/questions/180418

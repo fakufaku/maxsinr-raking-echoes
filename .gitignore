@@ -176,3 +176,4 @@ wandb/
 data/
 *.tar.gz
 datanet/
+figures/
