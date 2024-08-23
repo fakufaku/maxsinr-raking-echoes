@@ -13,6 +13,11 @@ tar xzfv otohikari_robin_measurements_20171207.tar.gz
 python ./experiment_max_sinr.py 5 pyramic --plot
 ```
 
+## Run with different beamformers and mask
+```bash
+ python ./experiment_different_bf_algos.py 5 pyramic --vad_guard 1024 --plot --bf souden_mvdr --mask led
+```
+
 ## Type of Beamformers
 
 - [x] MaxSIR (legacy)
@@ -20,14 +25,14 @@ python ./experiment_max_sinr.py 5 pyramic --plot
 - [x] MVDR (legacy)
 - [ ] Robust MVDR (legacy)
 - [x] Souden MVDR (legacy)
-- [ ] LCMV (legacy)
-- [ ] Rake BF (pyroomacoustics)
+- [x] LCMV (legacy)
+- [x] Rake BF (pyroomacoustics)
 
 Mask estimators
-- [x] LED
+- [x] led
+- [x] oracle
 - [ ] CACGMM mask-estimator
 - [ ] Neural BF
-
 
 
 To install **CACGMM**
