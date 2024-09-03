@@ -76,7 +76,6 @@ def plane_from_points(points):
             result += diff**2
         return result
 
-
     fun = functools.partial(error, points=points)
     params0 = [0, 0, 0]
     res = scipy.optimize.minimize(fun, params0)

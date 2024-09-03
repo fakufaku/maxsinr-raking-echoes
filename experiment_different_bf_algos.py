@@ -78,7 +78,7 @@ parser.add_argument(
     type=str, 
     default="led", 
     help="type of mask to use",
-    choices=["led", "oracle"]
+    choices=["led", "oracle-ibm", "oracle-wiener"]
 )
 parser.add_argument("--thresh", "-t", type=float, help="The threshold for VAD")
 parser.add_argument(
@@ -131,6 +131,16 @@ def process_experiment(SIR, mic, bf, mask, args):
     r, leds_ref = wavfile.read(file_speech_ref.format("camera_leds_zero_hold"))
     assert r == fs_snd
     fs = fs_snd # shorthand
+
+    # remove DC component
+    mix = mix - np.mean(mix, axis=0)
+    speech_ref = speech_ref - np.mean(speech_ref, axis=0)
+    noise_ref = noise_ref - np.mean(noise_ref, axis=0)
+
+    # high pass filter
+    mix = pra.highpass(mix.astype(float), fs_snd, fc=80)    
+    speech_ref = pra.highpass(speech_ref.astype(float), r, fc=80)
+    noise_ref = pra.highpass(noise_ref.astype(float), r, fc=80)
     
     # In case of objective evaluation, we do an artificial mix
     if args.synth_mix:
@@ -220,6 +230,7 @@ def process_experiment(SIR, mic, bf, mask, args):
     print(X.shape)
 
     X_mix = analysis(mix)
+    oracle_mask_speech = analysis(np.ones_like(mix) * vad_guarded[:, None])
     X_speech = analysis(mix * vad_guarded[:, None])
     X_noise = analysis(mix * (1 - vad_guarded[:, None]))
     
@@ -244,28 +255,46 @@ def process_experiment(SIR, mic, bf, mask, args):
     N_ref = pra.transform.stft.STFT(nfft, nfft // 2, pra.hann(nfft)).analysis(noise_ref_)
     # oracle_mask = np.abs(S_ref) > 20 * np.mean(np.abs(S_ref)[:20,:], axis=0)
     # oracle_mask = S_ref * oracle_mask
-    oracle_mask = np.abs(S_ref)**2 / (np.abs(S_ref)**2 + np.abs(N_ref)**2)
-    X_speech_oracle = X_mix * oracle_mask[:,:,None]
-
-    if mask == 'oracle':
-        X_speech = X_speech_oracle
-        X_noise = X_mix - X_speech_oracle
+    # X_speech_oracle = X_mix * oracle_mask[:,:,None]
+    # oracle_mask = (np.abs(S_ref) < 1 * np.mean(np.abs(S_ref)[:20,:], axis=0))[:,:,None]
+        
+    if mask == 'oracle-ibm':
+        oracle_mask = 20 * np.log10(abs(S_ref[...,None])) < 30
+        oracle_mask_noise = oracle_mask
+        oracle_mask_speech = (1 - oracle_mask_noise)
+        X_speech = X_mix
+        # X_speech = X_speech_masked 
+        X_noise = X_mix * oracle_mask
+    elif mask == "oracle-wiener":
+        oracle_mask_speech = (np.abs(S_ref)**2 / (np.abs(S_ref)**2 + np.abs(N_ref)**2))[...,None]
+        oracle_mask_noise = (np.abs(N_ref)**2 / (np.abs(S_ref)**2 + np.abs(N_ref)**2))[...,None]
+        oracle_mask = oracle_mask_noise
+        X_speech = X_mix
+        X_noise = X_mix * oracle_mask
     elif mask == 'led':
+        oracle_mask_speech = oracle_mask_speech
+        oracle_mask_noise = 1 - oracle_mask_speech
+        oracle_mask = oracle_mask_noise
         X_speech = X_speech
         X_noise = X_noise
     else:
         raise ValueError('Unknown mask type, should be "oracle" or "led", got {}'.format(args.mask))
     
     if args.plot:
-        fig, ax = plt.subplots(4, 1, figsize=(12, 6), sharex=True)
-        img = lr.display.specshow(lr.amplitude_to_db(np.abs(S_ref.T), ref=np.max), y_axis='log', x_axis='time', ax=ax[0], sr=fs)
-        ax[0].set_title("Speech reference")
-        img = lr.display.specshow(lr.amplitude_to_db(np.abs(N_ref.T), ref=np.max), y_axis='log', x_axis='time', ax=ax[1], sr=fs)
-        ax[1].set_title('Noise reference')
-        img = lr.display.specshow(np.abs(oracle_mask.T), y_axis='log', x_axis='time', ax=ax[2], sr=fs)
-        ax[2].set_title('Speech mask reference')
-        img = lr.display.specshow(lr.amplitude_to_db(np.abs(X_speech_oracle[:,:,0].T), ref=np.max), y_axis='log', x_axis='time', ax=ax[3], sr=fs)
-        ax[3].set_title('Masked mix')
+        
+        to_plot = [
+            (lr.amplitude_to_db(np.abs(S_ref.T), ref=np.max), "Speech reference"),
+            (np.abs(oracle_mask_speech.T)[0], "Mask speech reference"),
+            (lr.amplitude_to_db(np.abs(X_speech[:,:,0].T), ref=np.max), "Masked Mix for Speech"),
+            (lr.amplitude_to_db(np.abs(N_ref.T), ref=np.max), "Noise reference"),
+            (np.abs(oracle_mask_noise.T)[0], "Mask noise reference"),
+            (lr.amplitude_to_db(np.abs(X_noise[:,:,0].T), ref=np.max), "Masked Mix for Noise"),
+        ]
+        fig, ax = plt.subplots(len(to_plot), 1, figsize=(12, 12), sharex=True)
+        for i, (data, title) in enumerate(to_plot):
+            img = lr.display.specshow(data, y_axis='log', x_axis='time', ax=ax[i], sr=fs)
+            ax[i].set_title(title)
+            plt.colorbar(img, ax=ax[i])
         plt.tight_layout()
         plt.savefig(f'figures/{exp_name}-spectra_reference.png')
 
@@ -363,7 +392,8 @@ def process_experiment(SIR, mic, bf, mask, args):
     Rx = np.einsum("i...j,i...k->...jk", X_mix, np.conj(X_mix)) / X_mix.shape[-1]
     Rs = np.einsum("i...j,i...k->...jk", X_speech, np.conj(X_speech)) / X_speech.shape[-1]
     Rn = np.einsum("i...j,i...k->...jk", X_noise, np.conj(X_noise)) / X_noise.shape[-1]
-
+    Rn = Rn + 1e-7 * np.eye(Rn.shape[1])
+    
     # compute the MaxSINR beamformer
     if bf == 'maxsinr':
         w = max_sinr_weights(Rs[1:], Rn[1:])
@@ -836,7 +866,7 @@ def process_experiment(SIR, mic, bf, mask, args):
         plt.savefig(f'figures/{exp_name}-correlations.png')
         
         # plot all the plots
-        # plt.show()
+        plt.show()
         
     # Return SDR and SIR
     return SDR_out, SIR_out
