@@ -17,7 +17,8 @@ def compute_steering_vector(src_pos, mic_pos, c, freqs, ref_mic_idx=None, mode="
         toas -= np.min(toas)
     # compute steeering vectors
     a1 = np.exp(- 1j * 2 * np.pi * freqs[:,None,None] * toas[None,:,:]) # [nFreq x nMic]
-    a1 = a1 / a1[:,:,[ref_mic_idx]]
+    if ref_mic_idx is not None:
+        a1 /= a1[:,:,[ref_mic_idx]]
     return a1
 
 def mvdr_weights(image_pos, mic_pos, c, freqs, Rn, ref_mic_idx, reg=0.):
@@ -104,22 +105,20 @@ def delay_and_sum_weights(image_pos, mic_pos, c, freqs, ref_mic_idx):
     assert np.allclose(np.einsum("fi,fi->f", a1.conj(), w), np.ones(w.shape[0]) + 1j*0)
     return w
 
-def souden_weights(Rn, Rs, X_speech, ref_chan_idx, no_norm, clip_gain):
+def souden_weights(Rn, Rs, X_speech, ref_chan_idx, clip_gain):
     n_channels = Rs.shape[-1]
     # compute optimal weights
-    invRn = np.linalg.inv(Rn[1:])
-    num = np.einsum("fij,fjk->fik", invRn, Rs[1:])
+    invRn = np.linalg.inv(Rn)
+    num = np.einsum("fij,fjk->fik", invRn, Rs)
     denom = np.trace(num, axis1=1, axis2=2)
     w = (num / denom[:,None,None])[:,:,ref_chan_idx]
     # Post processing of the weights
     nw = la.norm(w, axis=1)
     w[nw > 1e-10, :] /= nw[nw > 1e-10, None]
-    w = np.concatenate([np.ones((1, n_channels)), w], axis=0)
-    
-    if not no_norm:
-        # normalize with respect to input signal
-        z = compute_gain(w, X_speech, X_speech[:, :, ref_chan_idx], clip_up=clip_gain)
-        w *= z[:, None]
+    # normalize with respect to input signal
+    z = compute_gain(w, X_speech, X_speech[:, :, ref_chan_idx], clip_up=clip_gain)
+    w *= z[:, None]
+        
     return w
 
 def max_sinr_weights(Rs, Rn):

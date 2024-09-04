@@ -80,6 +80,13 @@ parser.add_argument(
     help="type of mask to use",
     choices=["led", "oracle-ibm", "oracle-wiener"]
 )
+parser.add_argument(
+    "--speech-cov", 
+    type=str, 
+    default="led", 
+    help="type of mask to use",
+    choices=["mix", "masked"]
+)
 parser.add_argument("--thresh", "-t", type=float, help="The threshold for VAD")
 parser.add_argument(
     "--nfft", type=int, default=1024, help="The FFT size to use for STFT"
@@ -105,9 +112,9 @@ parser.add_argument("--plot", action="store_true", help="Display all the figures
 parser.add_argument("--all", action="store_true", help="Process all the samples")
 
 
-def process_experiment(SIR, mic, bf, mask, args):
+def process_experiment(SIR, mic, bf, mask, speech_cov, args):
 
-    exp_name = f"{mic}_SIR_{SIR}_dB_{bf}_mask_{mask}"
+    exp_name = f"{mic}_SIR_{SIR}_dB_{bf}_mask_{mask}_cov_{speech_cov}"
 
     nfft = args.nfft
     vad_guard = args.vad_guard
@@ -262,20 +269,20 @@ def process_experiment(SIR, mic, bf, mask, args):
         oracle_mask = 20 * np.log10(abs(S_ref[...,None])) < 30
         oracle_mask_noise = oracle_mask
         oracle_mask_speech = (1 - oracle_mask_noise)
-        X_speech = X_mix
+        X_speech = X_mix * oracle_mask_speech if speech_cov == "masked" else X_mix
         # X_speech = X_speech_masked 
         X_noise = X_mix * oracle_mask
     elif mask == "oracle-wiener":
         oracle_mask_speech = (np.abs(S_ref)**2 / (np.abs(S_ref)**2 + np.abs(N_ref)**2))[...,None]
         oracle_mask_noise = (np.abs(N_ref)**2 / (np.abs(S_ref)**2 + np.abs(N_ref)**2))[...,None]
         oracle_mask = oracle_mask_noise
-        X_speech = X_mix
+        X_speech = X_mix * oracle_mask_speech if speech_cov == "masked" else X_mix
         X_noise = X_mix * oracle_mask
     elif mask == 'led':
         oracle_mask_speech = oracle_mask_speech
         oracle_mask_noise = 1 - oracle_mask_speech
         oracle_mask = oracle_mask_noise
-        X_speech = X_speech
+        X_speech = X_speech if speech_cov == "masked" else X_mix
         X_noise = X_noise
     else:
         raise ValueError('Unknown mask type, should be "oracle" or "led", got {}'.format(args.mask))
@@ -407,32 +414,32 @@ def process_experiment(SIR, mic, bf, mask, args):
         w *= z[:, None]
         
     elif bf == 'ds':
-        w = delay_and_sum_weights(room.sources[0].position[:,None], room.mic_array.R, room.c, freqs, 0)
+        w = delay_and_sum_weights(room.sources[0].position[:,None], room.mic_array.R, room.c, freqs, None)
 
     elif bf == 'mvdr':
-        w = mvdr_weights(room.sources[0].position[:,None], room.mic_array.R, room.c, freqs[1:], Rn[1:], 0)
-        w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
-
-    elif bf == 'mpdr':
-        w = mvdr_weights(room.sources[0].position[:,None], room.mic_array.R, room.c, freqs[1:], Rx[1:], 0)
+        w = mvdr_weights(room.sources[0].position[:,None], room.mic_array.R, room.c, freqs[1:], Rn[1:], None)
         w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
         
+    elif bf == 'mpdr':
+        w = mvdr_weights(room.sources[0].position[:,None], room.mic_array.R, room.c, freqs[1:], Rx[1:], None, 1e-6)
+        w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
+
     elif bf == 'lcmv':
         w = lcmv_weights(
-            room.sources[0].position[:,None], 
-            room.sources[1].position[:,None], 
-            room.mic_array.R, room.c, freqs[1:], Rn[1:], 0, 0)
+            room.sources[0].position[:,None], # good
+            room.sources[1].position[:,None], # bad
+            room.mic_array.R, room.c, freqs[1:], Rn[1:], None, 0)
         w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
     
     elif bf == 'rake':
         w = rake_weights(
             source_echoes[0]["images"][:,:5], 
-            room.mic_array.R, room.c, freqs[1:], Rn[1:], 0, 0)
+            room.mic_array.R, room.c, freqs[1:], Rn[1:], None, 0)
         w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
         
     elif bf == 'souden':
-        w = souden_weights(Rn[1:], Rs[1:], X_speech, 0, args.no_norm, args.clip_gain)
-        w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
+        w = souden_weights(Rn[1:], Rs[1:], X_speech[:,1:], 0, clip_gain=args.clip_gain)
+        w = np.concatenate([np.zeros((1, n_channels)), w], axis=0)
         
     bf_weights = w
 
@@ -478,6 +485,7 @@ def process_experiment(SIR, mic, bf, mask, args):
     results = {
         "BF" : bf,
         "mask" : mask,
+        "speech_cov" : speech_cov,
         "SIR_in": SIR_in,
         "SDR_in": SDR_in,
         "SIR_out": SIR_out,
@@ -787,8 +795,8 @@ def process_experiment(SIR, mic, bf, mask, args):
         elevation = elevation.flatten()
         src_pos = 2*np.stack([np.cos(azimuth) * np.sin(elevation), np.sin(azimuth) * np.sin(elevation), np.cos(elevation)])
         mic_pos = room.mic_array.R - room.mic_array.center
-        svects = compute_steering_vector(src_pos, mic_pos, room.c, freqs, ref_mic_idx=0) # nDoas x nChan
-        
+        svects = compute_steering_vector(src_pos, mic_pos, room.c, freqs, ref_mic_idx=None) # nDoas x nChan
+
         # Assuming a unit sphere for visualization
         r = np.abs(np.einsum('fm,fsm->fs', bf_weights.conj(), svects))**2
         r = np.mean(r, axis=0)
@@ -844,13 +852,11 @@ def process_experiment(SIR, mic, bf, mask, args):
             N = images_.shape[1]
             
             # freqs_to_plot = np.array([125.0, 218.75, 406.25, 500.0, 718.75, 1218.75]) # Hz, manual
-            ref_mic_idx = 0
             src_pos = images_
             mic_pos = room.mic_array.R
-            svects = compute_steering_vector(src_pos, mic_pos, room.c, freqs, ref_mic_idx=0) # Freq x nDoas x nChan
-            correlation = np.real(np.einsum('fm,fsm->fs', bf_weights.conj()[1:], svects[1:])) \
-                / (np.linalg.norm(bf_weights[1:], axis=1)[:,None] * np.linalg.norm(svects[1:], axis=2)) # [nFreq x nDoas]
-
+            svects = compute_steering_vector(src_pos, mic_pos, room.c, freqs, ref_mic_idx=None) # Freq x nDoas x nChan
+            correlation = np.real(np.einsum('fm,fsm->fs', bf_weights.conj()[1:], svects[1:])) 
+            # / (np.linalg.norm(bf_weights[1:], axis=1)[:,None] * np.linalg.norm(svects[1:], axis=2)) # [nFreq x nDoas]
             img = axarr[j].imshow(np.abs(correlation), aspect='auto', origin='lower', interpolation='nearest')
             plt.colorbar(img, ax=axarr[j])
             # axarr[j].plot(np.arange(N), np.sum(correlation, axis=0))
@@ -916,9 +922,10 @@ if __name__ == "__main__":
             mic = args.mic
             bf = args.bf
             mask = args.mask
+            speech_cov = args.speech_cov
         except:
             raise ValueError(
                 "When the keyword --all is not used, SIR and mic are required arguments"
             )
 
-        SDR_out, SIR_out = process_experiment(SIR, mic, bf, mask, args)
+        SDR_out, SIR_out = process_experiment(SIR, mic, bf, mask, speech_cov, args)
