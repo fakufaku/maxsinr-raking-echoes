@@ -71,7 +71,7 @@ parser.add_argument(
     type=str, 
     default="maxsinr", 
     help="type of beamformer to use",
-    choices=["ds", "maxsinr", "mvdr", "mvdr_robust", "mpdr", "souden", "lcmv", "rake"]
+    choices=["ds", "maxsinr", "mvdr", "mvdr_iso", "mvdr_robust", "mpdr", "souden", "lcmv", "rake"]
 )
 parser.add_argument(
     "--mask", 
@@ -237,9 +237,6 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
     print(X.shape)
 
     X_mix = analysis(mix)
-    oracle_mask_speech = analysis(np.ones_like(mix) * vad_guarded[:, None])
-    X_speech = analysis(mix * vad_guarded[:, None])
-    X_noise = analysis(mix * (1 - vad_guarded[:, None]))
     
     # Signal alignment step
     delay = np.abs(int(pra.tdoa(speech_ref[:, 0].astype(float), mix[:,0], phat=True)))
@@ -260,17 +257,12 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         
     S_ref = pra.transform.stft.STFT(nfft, nfft // 2, pra.hann(nfft)).analysis(speech_ref_)
     N_ref = pra.transform.stft.STFT(nfft, nfft // 2, pra.hann(nfft)).analysis(noise_ref_)
-    # oracle_mask = np.abs(S_ref) > 20 * np.mean(np.abs(S_ref)[:20,:], axis=0)
-    # oracle_mask = S_ref * oracle_mask
-    # X_speech_oracle = X_mix * oracle_mask[:,:,None]
-    # oracle_mask = (np.abs(S_ref) < 1 * np.mean(np.abs(S_ref)[:20,:], axis=0))[:,:,None]
         
     if mask == 'oracle-ibm':
         oracle_mask = 20 * np.log10(abs(S_ref[...,None])) < 30
         oracle_mask_noise = oracle_mask
         oracle_mask_speech = (1 - oracle_mask_noise)
         X_speech = X_mix * oracle_mask_speech if speech_cov == "masked" else X_mix
-        # X_speech = X_speech_masked 
         X_noise = X_mix * oracle_mask
     elif mask == "oracle-wiener":
         oracle_mask_speech = (np.abs(S_ref)**2 / (np.abs(S_ref)**2 + np.abs(N_ref)**2))[...,None]
@@ -279,6 +271,9 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         X_speech = X_mix * oracle_mask_speech if speech_cov == "masked" else X_mix
         X_noise = X_mix * oracle_mask
     elif mask == 'led':
+        oracle_mask_speech = analysis(np.ones_like(mix) * vad_guarded[:, None])
+        X_speech = analysis(mix * vad_guarded[:, None])
+        X_noise = analysis(mix * (1 - vad_guarded[:, None]))
         oracle_mask_speech = oracle_mask_speech
         oracle_mask_noise = 1 - oracle_mask_speech
         oracle_mask = oracle_mask_noise
@@ -401,6 +396,7 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
     Rn = np.einsum("i...j,i...k->...jk", X_noise, np.conj(X_noise)) / X_noise.shape[-1]
     Rn = Rn + 1e-7 * np.eye(Rn.shape[1])
     
+    
     # compute the MaxSINR beamformer
     if bf == 'maxsinr':
         w = max_sinr_weights(Rs[1:], Rn[1:])
@@ -415,13 +411,20 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         
     elif bf == 'ds':
         w = delay_and_sum_weights(room.sources[0].position[:,None], room.mic_array.R, room.c, freqs, None)
+    
+    elif bf == 'mvdr_iso':
+        mic_pos = room.mic_array.R - room.mic_array.center # [3 x I]
+        ell_ii = np.linalg.norm(mic_pos[:,None,:] - mic_pos[:,:,None], axis=0) # [I x I]
+        Gamma = np.sinc(2 * np.pi * freqs[:,None,None] * ell_ii[None] / room.c) # [F x I x I]
+        w = mvdr_weights(room.sources[0].position[:,None], room.mic_array.R, room.c, freqs[1:], Gamma[1:], None, True)
+        w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
 
     elif bf == 'mvdr':
-        w = mvdr_weights(room.sources[0].position[:,None], room.mic_array.R, room.c, freqs[1:], Rn[1:], None)
+        w = mvdr_weights(room.sources[0].position[:,None], room.mic_array.R, room.c, freqs[1:], Rn[1:], None, True)
         w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
-        
-    elif bf == 'mpdr':
-        w = mvdr_weights(room.sources[0].position[:,None], room.mic_array.R, room.c, freqs[1:], Rx[1:], None, 1e-6)
+            
+    elif bf == 'mpdr':        
+        w = mvdr_weights(room.sources[0].position[:,None], room.mic_array.R, room.c, freqs[1:], Rx[1:], None, 1e-6, True)
         w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
 
     elif bf == 'lcmv':

@@ -21,7 +21,19 @@ def compute_steering_vector(src_pos, mic_pos, c, freqs, ref_mic_idx=None, mode="
         a1 /= a1[:,:,[ref_mic_idx]]
     return a1
 
-def mvdr_weights(image_pos, mic_pos, c, freqs, Rn, ref_mic_idx, reg=0.):
+def mvdr_weights(image_pos, mic_pos, c, freqs, Rn, ref_mic_idx, reg=0., diag_loading:bool = False):
+    
+    # # add diagonal loading
+    nFreq, nChan, nChan = Rn.shape
+    threshold = int(1e2)
+    if diag_loading:
+        print("Adding diagonal loading")
+        for fi in range(nFreq):
+            cn0 = np.linalg.cond(Rn[fi]) # original condition number
+            if cn0>threshold:
+                ev = np.linalg.eig(Rn[fi])[0] # eigenvalues only
+                Rn[fi] = Rn[fi] + np.eye(nChan) * (ev.max() - threshold * ev.min()) / (threshold-1)
+    
     a1 = compute_steering_vector(image_pos, mic_pos, c, freqs, ref_mic_idx)
     assert len(a1.shape) == 3
     assert a1.shape[1] == 1
