@@ -212,7 +212,6 @@ def process_experiment_max_sinr(SIR, mic, args):
 
     if not args.no_norm:
         # normalize with respect to input signal
-        import ipdb; ipdb.set_trace()
         z = compute_gain(w, X_speech, X_speech[:, :, 0], clip_up=args.clip_gain)
         w *= z[:, None]
 

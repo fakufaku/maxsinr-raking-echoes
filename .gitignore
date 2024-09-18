@@ -176,3 +176,6 @@ wandb/
 data/
 *.tar.gz
 datanet/
+figures/
+cacgmm/
+results/
