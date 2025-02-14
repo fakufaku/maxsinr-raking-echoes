@@ -22,6 +22,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
 from max_sinr_beamforming import compute_gain
+from cacgmm import CACGMM
+
 from beamformers import (
     mvdr_weights, 
     delay_and_sum_weights, 
@@ -78,7 +80,7 @@ parser.add_argument(
     type=str, 
     default="led", 
     help="type of mask to use",
-    choices=["led", "oracle-ibm", "oracle-wiener"]
+    choices=["led", "oracle-ibm", "oracle-wiener", "cacgmm"]
 )
 parser.add_argument(
     "--speech-cov", 
@@ -279,6 +281,24 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         oracle_mask = oracle_mask_noise
         X_speech = X_speech if speech_cov == "masked" else X_mix
         X_noise = X_noise
+    elif mask == 'cacgmm':
+        from ssspy.bss.ilrma import GaussILRMA
+        ilrma = GaussILRMA(n_basis=3, rng=np.random.default_rng(42))
+        cacgmm = CACGMM(
+            n_sources=2,
+            reference_id=0,
+            permutation_alignment="posterior_score",
+            global_iter=100,
+            local_iter=100,
+            rng=np.random.default_rng(42)
+        )
+        X_mix = analysis(mix)
+        spectrogram_est = cacgmm(X_mix.transpose(2,1,0)[:4], n_iter=10)
+        spectrogram_est = ilrma(X_mix.transpose(2,1,0)[:4], n_iter=500)
+        import ipdb; ipdb.set_trace()
+        X_speech = spectrogram_est.transpose(2,1,0)
+        X_noise = X_mix - X_speech[...,1:]
+        import ipdb; ipdb.set_trace()
     else:
         raise ValueError('Unknown mask type, should be "oracle" or "led", got {}'.format(args.mask))
     
@@ -429,8 +449,8 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
 
     elif bf == 'lcmv':
         w = lcmv_weights(
-            room.sources[0].position[:,None], # good
-            room.sources[1].position[:,None], # bad
+            room.sources[0].position[:,None], # target
+            room.sources[1].position[:,None], # interf
             room.mic_array.R, room.c, freqs[1:], Rn[1:], None, 0)
         w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
     
