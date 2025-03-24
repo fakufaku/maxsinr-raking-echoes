@@ -264,7 +264,6 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         axarr[2].set_title("Mix")
         plt.tight_layout()
         plt.savefig(f'figures/{exp_name}-signals_reference.png')
-        plt.close()
         
     S_ref = pra.transform.stft.STFT(nfft, nfft // 2, pra.hann(nfft)).analysis(speech_ref_) # [T x F]
     N_ref = pra.transform.stft.STFT(nfft, nfft // 2, pra.hann(nfft)).analysis(noise_ref_)  # [T x F]
@@ -340,7 +339,6 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         plt.colorbar()
         plt.tight_layout()
         plt.savefig(f'figures/{exp_name}-cacgmm-masks.png')
-        plt.close()
         
         masks = rearrange(affiliation_pa, 's f t -> s t f')
         
@@ -373,13 +371,12 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
             plt.colorbar(img, ax=ax[i])
         plt.tight_layout()
         plt.savefig(f'figures/{exp_name}-spectra_reference.png')
-        plt.close()
 
     ###############
     ## MAKE ROOM ##
     ###############
     
-    rt60 = 0.123  # seconds. A dummy value for now
+    rt60 = 0.300  # seconds. A dummy value for now
     e_absorption, max_order = pra.inverse_sabine(rt60, room_dim)
 
     print("absorption = ", e_absorption)
@@ -431,7 +428,7 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         src_images_dampings = src_images_dampings[idx]
         src_images_order = src_images_order[idx]
         coeff = src_images_dampings / src_images_dist
-        
+    
         # get the wall list
         src_images_walls = get_wall_order_from_images(src_images_pos, mics_loc, room_dim)
         
@@ -446,8 +443,7 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         # compute acoustic images
         atfs = []
         for d in range(N_IMAGES_PERFORMANCE):
-            atf = coeff[d] * compute_steering_vector(src_images_pos[:,[d]], room.mic_array.R, room.c, freqs, ref_mic_idx=None, mode="near")
-            atfs.append(atf)
+            atfs.append(compute_steering_vector(src_images_pos[:,[d]], room.mic_array.R, room.c, freqs, ref_mic_idx=None, mode="near"))
         atfs = np.concatenate(atfs, axis=1)
         incrememntal_atf = np.cumsum(atfs, axis=1)
         
@@ -459,7 +455,7 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
             "images" : src_images_pos,
             "walls" : src_images_walls,
             "order" : src_images_order,
-            "images_names" : images_names,
+            "image_names" : images_names,
             "atfs_fji" : atfs,
             "incremental_atf_fji" : incrememntal_atf,
         })
@@ -474,7 +470,7 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
     sys.stdout.flush()
     
     assert X_mix.shape == (nTime, nFreq, nMic)
-    assert X_mix.shape == X_speech.shape == X_noise.shape    
+    assert X_mix.shape == X_speech.shape == X_noise.shape
     
     # covariance matrices from noisy signal
     Rx = np.einsum("i...j,i...k->...jk", X_mix, np.conj(X_mix)) / X_mix.shape[0]
@@ -508,7 +504,7 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         w_r = np.stack(w_r, axis=-1)
     
     elif bf == 'mvdr_iso':
-        mic_pos = room.mic_array.R # [3 x I]
+        mic_pos = room.mic_array.R - room.mic_array.center # [3 x I]
         ell_ii = np.linalg.norm(mic_pos[:,None,:] - mic_pos[:,:,None], axis=0) # [I x I]
         Gamma = np.sinc(2 * np.pi * freqs[:,None,None] * ell_ii[None] / room.c) # [F x I x I]
         w_r = []
@@ -558,7 +554,7 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
     elif bf == 'souden':
         w_r = []
         for i in range(nMic):
-            w = souden_weights(Rn[1:], Rs[1:], 0, clip_gain=args.clip_gain)
+            w = souden_weights(Rn[1:], Rs[1:], X_speech[:,1:], 0, clip_gain=args.clip_gain)
             w = np.concatenate([np.zeros((1, w.shape[1])), w], axis=0)
             w_r.append(w)
         w_r = np.stack(w_r, axis=-1)
@@ -605,7 +601,6 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
     SDR_out = metric[0][0]
     SIR_out = metric[2][0]
     
-    # metric improvement
     iSDR = SDR_out - SDR_in
     iSIR = SIR_out - SIR_in
     
@@ -613,7 +608,7 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
     ## Per-image metrics  ##
     ########################
     
-    print("Apply beamforming to images")
+    print("Compute metrics per image")
     
     contribution_time = []
     incremental_contribution_time = []
@@ -632,7 +627,7 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         # apply beamforming
         bf_contribution = np.einsum('fm,tfjm->tfj', bf_weights.conj(), contribution)
         bf_incremental_contribution = np.einsum('fm,tfjm->tfj', bf_weights.conj(), incremental_contribution)
-
+        
         # go in the time domain
         _stacked_synthesis = lambda x: np.stack([synthesis(x[:,:,j,:]) for j in range(x.shape[2])], axis=1) # [T x nDoas x nChan]
         contribution_time.append(_stacked_synthesis(contribution)) # [T x nDoas x nChan]
@@ -641,13 +636,8 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         bf_contribution_time.append(_stacked_synthesis(repeat(bf_contribution, 't f j -> t f j i', i = nMic))[...,0]) # [T x nDoas x nChan]
         bf_incremental_contribution_time.append(_stacked_synthesis(repeat(bf_incremental_contribution, 't f j -> t f j i', i = nMic))[...,0]) # [T x nDoas x nChan]
     
-    print("Compute metrics per single image")
-    
     SDR_out_per_image = []
     SIR_out_per_image = []
-    iSDR_per_image = []
-    iSIR_per_image = []
-    
     for k in range(N_IMAGES_PERFORMANCE):
         out = bf_contribution_time[0][:,k]
         # Signal alignment step
@@ -667,8 +657,8 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         sig_eval = np.vstack([out_trunc, noise_eval])
 
         # We use the BSS eval toolbox
-        metric_out = bss_eval_images(ref[:, : L, None], sig_eval[:, : L, None])
-        metric_in  = bss_eval_images(ref[:, : L, None], np.stack([mix.T[ref_mic,: L, None]]*2, axis=0))
+        metric = bss_eval_images(ref[:, : L, None], sig_eval[:, : L, None])
+        
         # plot signals
         if True:
             fig, axarr = plt.subplots(1, 2, figsize=(12, 6), sharex=True, sharey=True, squeeze=False)
@@ -678,24 +668,13 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
             axarr[0, 1].plot(sig_eval[1])
             plt.tight_layout()
             plt.savefig(f'figures/{exp_name}-signals_{k}.png')
-            plt.close()
 
         # we are only interested in SDR and SIR for the speech source
-        SDR_out_per_image.append(metric_out[0][0])
-        SIR_out_per_image.append(metric_out[2][0])
-        
-        iSDR_per_image.append(metric_out[0][0] - metric_in[0][0])
-        iSIR_per_image.append(metric_out[2][0] - metric_in[2][0])
-        
-    print("iSDR", iSDR_per_image)
-    print("iSIR", iSIR_per_image)
-    
-    print("Compute metrics per incremental image")
+        SDR_out_per_image.append(metric[0][0])
+        SIR_out_per_image.append(metric[2][0])
         
     SDR_out_per_incremental_image = []
     SIR_out_per_incremental_image = []
-    iSDR_per_incremental_image = []
-    iSIR_per_incremental_image = []
     for k in range(N_IMAGES_PERFORMANCE):
         out = bf_incremental_contribution_time[0][:,k]
         # Signal alignment step
@@ -715,20 +694,13 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         sig_eval = np.vstack([out_trunc, noise_eval])
 
         # We use the BSS eval toolbox
-        metric_out = bss_eval_images(ref[:, : L, None], sig_eval[:, : L, None])
-        metric_in  = bss_eval_images(ref[:, : L, None], np.stack([mix.T[ref_mic,: L, None]]*2, axis=0))
+        metric = bss_eval_images(ref[:, : L, None], sig_eval[:, : L, None])
 
         # we are only interested in SDR and SIR for the speech source
-        SDR_out_per_incremental_image.append(metric_in[0][0])
-        SIR_out_per_incremental_image.append(metric_in[2][0])
-        
-        iSDR_per_incremental_image.append(metric_out[0][0] - metric_in[0][0])
-        iSIR_per_incremental_image.append(metric_out[2][0] - metric_in[2][0])
-        
-    print("iSDR", iSDR_per_incremental_image)
-    print("iSIR", iSIR_per_incremental_image)
+        SDR_out_per_incremental_image.append(metric[0][0])
+        SIR_out_per_incremental_image.append(metric[2][0]) 
     
-    # # # Correlation for each image
+    # # Correlation for each image
     # for j in range(len(room.sources)):
         
     #     name = source_echoes[j]['name']
@@ -741,6 +713,7 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         
     #     N = images_.shape[1]
         
+    #     # freqs_to_plot = np.array([125.0, 218.75, 406.25, 500.0, 718.75, 1218.75]) # Hz, manual
     #     src_pos = images_
     #     mic_pos = room.mic_array.R
         
@@ -774,7 +747,6 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
     #         plt.tight_layout()
     #         plt.show()
     #     plt.savefig(f'figures/{exp_name}-correlation_{name}_source-{j}.png')
-        # plt.close()
     
     # write results to dict then to csv with pandas
     results = {
@@ -787,18 +759,13 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         "SDR_out": SDR_out,
         "iSDR": iSDR,
         "iSIR": iSIR,
-        "images_names" : source_echoes[0]['images_names'][:N_IMAGES_PERFORMANCE],
-        "images_idx" : np.arange(N_IMAGES_PERFORMANCE).tolist(),
+        "images_names" : source_echoes[0]['images_names'],
         "SDR_out_per_image" : SDR_out_per_image,
         "SIR_out_per_image" : SIR_out_per_image,
         "SDR_out_per_incremental_image" : SDR_out_per_incremental_image,
         "SIR_out_per_incremental_image" : SIR_out_per_incremental_image,
-        "iSDR_out_per_image" : iSDR_per_image,
-        "iSIR_out_per_image" : iSIR_per_image,
-        "iSDR_out_per_incremental_image" : iSDR_per_incremental_image,
-        "iSIR_out_per_incremental_image" : iSIR_per_incremental_image,
     }
-    df = pd.DataFrame(results)
+    df = pd.DataFrame(results, index=[0])
     df.to_csv(f'results/{exp_name}.csv', header=True, index=False)
 
     print(f'SDR {SDR_in:.2f} --> {SDR_out:.2f} ==> improv: {iSDR:.2f}')
@@ -843,7 +810,6 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
             plt.scatter(mics_positions[:,1], mics_positions[:,2], c='r')
             plt.tight_layout()
             plt.savefig(f'figures/{exp_name}-mics_positions.png')
-            plt.close()
 
             # SIGNAL
             plt.figure()
@@ -859,7 +825,6 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
             # plt.plot(led_time, leds, "r")
             # plt.title("LED signal")
             # plt.savefig(f'figures/{exp_name}-led.png')
-            # plt.close()
 
             # match the scales of VAD and light to sound before plotting
             q_vad = np.max(mix)
@@ -873,7 +838,6 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
             plt.legend(["mix", "VAD"])
             plt.title("LED and mix signals")
             plt.savefig(f'figures/{exp_name}-led_and_mix_signals.png')
-            plt.close()
 
             fig, axarr = plt.subplots(4, 1, figsize=(12, 8), sharex=True)
             a_time = np.arange(mix.shape[0]) / fs_snd
@@ -888,7 +852,6 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
             axarr[3].plot(a_time, speech_ref[:, 0])
             axarr[3].set_title("Speech reference")
             plt.savefig(f'figures/{exp_name}-ch0_and_bf_output.png')
-            plt.close()
             
             # SIGNAL IN FREQ DOMAIN
             n_frames_n = np.sum(np.mean(np.abs(X_noise)[...,0], axis=1) > 1e-6 ) # number of frame where noise is active
@@ -906,7 +869,6 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
             plt.legend()        
             plt.title('Spectrum of the signals, channel 0, salient frequencies')
             plt.savefig(f'figures/{exp_name}-spectra.png')
-            plt.close()
 
             plt.figure()
             mic_array.plot_beam_response()
@@ -916,7 +878,6 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
                 nfft // 2,
             )
             plt.savefig(f'figures/{exp_name}-beam_response.png')
-            plt.close()
                     
             # plot beamformer weights
             theta = np.deg2rad(np.arange(-180, 180, 1))
@@ -969,7 +930,6 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
             fig_pol.tight_layout()
             fig_pol.savefig(f'figures/{exp_name}-beam_pattern_polar_2D.png')
             fig_lin.savefig(f'figures/{exp_name}-beam_pattern_linear_2D.png')
-            plt.close()
             
             def generate_axes(fig):
                 gridspec = fig.add_gridspec(nrows=24, ncols=12)
@@ -1062,7 +1022,6 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
             plt.suptitle(f'Beamforming directivity pattern vs sources DOAs at {SIR} dB')
             plt.tight_layout()            
             plt.savefig(f'figures/{exp_name}-beam_pattern_per_freqs.png')
-            plt.close()
             
             ## PLOT 2D ROOM WITH IMAGES
             fig, ax = plt.subplots()
@@ -1084,7 +1043,6 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
             ax.add_patch(rect)
             plt.legend()
             plt.savefig(f'figures/{exp_name}-room_images.png')
-            plt.close()
 
             # spectrograms
             fig, ax = plt.subplots(figsize=(12, 4))
@@ -1092,14 +1050,12 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
             ax.set_title('X_speech')
             fig.colorbar(img, ax=ax, format="%+2.0f dB")
             plt.savefig(f'figures/{exp_name}-spetrum_speech.png')
-            plt.close()
 
             fig, ax = plt.subplots(figsize=(12, 4))
             img = lr.display.specshow(lr.amplitude_to_db(np.abs(X_noise[...,0].T), ref=np.max), y_axis='log', x_axis='time', ax=ax, sr=fs)
             ax.set_title('X_noise')
             fig.colorbar(img, ax=ax, format="%+2.0f dB")
             plt.savefig(f'figures/{exp_name}-spetrum_noise.png')
-            plt.close()
         
         ## PLOT 3D BEAMFORMER RADIATION PATTERN
         azimuth = np.linspace(0, 2 * np.pi, 100)
@@ -1149,7 +1105,6 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
         ax.set_title('3D Beamforming Weights')
         plt.tight_layout()
         plt.savefig(f'figures/{exp_name}-beam_patterns_3D.png')
-        plt.close()
         
         ## Correlation plots
         fig, axarr = plt.subplots(2, 1, figsize=(12, 8))
@@ -1187,8 +1142,10 @@ def process_experiment(SIR, mic, bf, mask, speech_cov, args):
             
         fig.tight_layout()
         plt.savefig(f'figures/{exp_name}-correlations.png')
-        plt.close()
-                
+        
+        # plot all the plots
+        plt.show()
+        
     # Return SDR and SIR
     return SDR_out, SIR_out
 

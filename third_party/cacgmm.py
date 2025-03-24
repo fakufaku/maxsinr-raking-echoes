@@ -1,6 +1,6 @@
 from ssspy.bss.cacgmm import CACGMM as CACGMMBase
-from tqdm import tqdm
 import numpy as np
+from tqdm import tqdm
 
 class CACGMM(CACGMMBase):
     def __init__(self, *args, **kwargs):
@@ -20,4 +20,5 @@ class CACGMM(CACGMMBase):
             self.progress_bar = tqdm(total=self.n_iter)
 
         super().update_once()
+
         self.progress_bar.update(1)

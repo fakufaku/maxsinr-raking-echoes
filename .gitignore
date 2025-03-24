@@ -179,3 +179,7 @@ datanet/
 figures/
 cacgmm/
 results/
+pretrained_models/
+*.pdf
+*.png
+.vscode

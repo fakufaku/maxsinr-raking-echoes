@@ -83,15 +83,15 @@ class complexGMM_mvdr:
                                             
                     # update p (real)
                     k_noise_1 = np.matmul(np.conj(obs).T , R_noise_inv / phi_noise[t, f])            
-                    k_noise = np.matmul(k_noise_1, obs)       
-                    tmp_p_noise = np.linalg.det((phi_noise[t, f] * R_noise_onbin).astype(np.float64))
+                    k_noise = np.matmul(k_noise_1, obs)
+                    tmp_p_noise = np.linalg.det(np.real(phi_noise[t, f] * R_noise_onbin).astype(np.float64))
                     p_noise[t, f] = np.real(np.exp( - np.real(k_noise).astype(np.float64)) / (np.pi * tmp_p_noise))                    
                     # avoid nan or inf
                     if np.isnan(p_noise[t, f]) == True or np.isinf(p_noise[t, f]) == True:
                         p_noise[t, f] = np.nan_to_num(p_noise[t, f])                    
                     k_noisy_1 = np.matmul(np.conj(obs).T, R_noisy_inv / phi_noisy[t, f])
                     k_noisy = np.real(np.matmul(k_noisy_1, obs))
-                    tmp_p_noisy = np.linalg.det((phi_noisy[t, f] * R_noisy_onbin).astype(np.float64))
+                    tmp_p_noisy = np.linalg.det(np.real(phi_noisy[t, f] * R_noisy_onbin).astype(np.float64))
                     p_noisy[t, f] = np.real(np.exp( - np.real(k_noisy).astype(np.float64)) / (np.pi * tmp_p_noisy))     
                     # avoid nan or inf
                     if np.isnan(p_noisy[t, f]) == True or np.isinf(p_noisy[t, f]) == True:

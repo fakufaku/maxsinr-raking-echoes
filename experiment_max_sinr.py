@@ -11,7 +11,6 @@ import numpy as np
 import scipy.linalg as la
 from scipy.io import wavfile
 import pyroomacoustics as pra
-import sounddevice as sd
 from mir_eval.separation import bss_eval_images
 
 import matplotlib.pyplot as plt
