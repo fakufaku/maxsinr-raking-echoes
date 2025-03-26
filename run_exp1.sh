@@ -6,15 +6,15 @@ EXP_ID=1
 MAX_JOBS=${1:-4}    # Defaults to 4 if not provided.
 
 job_count=0
-for SIR in -5 0 5 10
+for SIR in -10 -5 0 5 10 15 20
 do
-for RT60 in 0.3 0.6
+for RT60 in 0.3 0.6 0.9
 do
-for BF in ds max_sinr mvdr
+for BF in ds max_sinr mvdr souden_weights matched rake
 do
-for MASK in oracle_vad oracle_scm
+for MASK in oracle_vad oracle_scm cacgmm
 do
-for NOISE_LOC in noise_doa speech_doa
+for NOISE_LOC in noise_doa speech_doa 
 do
 if [ ${BF} == "ds" ] && [ ${MASK} != "oracle_vad" ]; then
 continue

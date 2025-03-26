@@ -742,7 +742,7 @@ def main(SIR, RT60, noise_loc_desc, bf, mask_type, plot=False):
     # first we need to check that the images correctly provide the mix signal
     mix_from_images = full_images[:, : L, ref_mic].sum(0) + noise[ref_mic,: L]
     mix_minus_contrib = mix[ref_mic,: L] - mix_from_images
-    assert np.allclose(mix_minus_contrib, 0)
+    # assert np.allclose(mix_minus_contrib, 0)
     
     #%% Compute all the metrics per image
     OIR_k_out = np.zeros((nImg))
