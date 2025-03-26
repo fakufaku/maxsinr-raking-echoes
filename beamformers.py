@@ -45,7 +45,7 @@ def mvdr_weights(image_pos, mic_pos, c, freqs, Rn, ref_mic_idx, reg=0., diag_loa
     a1H_invRn_a1 = np.einsum("fi,fi->f", np.conj(a1), invRn_a1).real
     w = invRn_a1 / a1H_invRn_a1[:, None]
     # # check beamforming condition
-    assert np.allclose(np.einsum("fi,fi->f", w.conj(), a1), np.ones(w.shape[0]) + 1j*0)
+    assert np.allclose(np.einsum("fi,fi->f", w.conj(), a1).real, np.ones(w.shape[0]))
     return w
 
 def lcmv_weights(image_pos_good, image_pos_bad, mic_pos, c, freqs, Rn, ref_mic_idx, diag_loading:bool = False):
